@@ -2,3 +2,5 @@
 
 # dependencies
 .env
+.venv
+__pycache__/

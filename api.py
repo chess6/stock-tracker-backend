@@ -3,7 +3,7 @@ from flask_cors import CORS
 import requests
 import os
 from dotenv import load_dotenv
-
+import json
 
 load_dotenv()
 
@@ -38,7 +38,7 @@ def manage_portfolio():
 @app.route('/api/ticker/<ticker>/summary', methods=['GET'])
 def ticker_summary(ticker):
     # Mock response for development
-    mock = {
+    mock_data = {
         "prices": [
             {
                 "adjClose": 249.34,
@@ -57,29 +57,43 @@ def ticker_summary(ticker):
             }
         ]
     }
-    return jsonify(mock)
+    return jsonify(mock_data)
 
 @app.route('/api/ticker/<ticker>/intraday', methods=['GET'])
 def ticker_intraday(ticker):
-    # Fetch intraday prices from Tiingo IEX endpoint, resampled to 4min
-    url = f"{TIINGO_BASE_URL}/iex/{ticker}/prices"
-    params = {'token': TIINGO_API_KEY, 'resampleFreq': '4min'}
-    resp = requests.get(url, params=params)
-    if resp.status_code != 200:
-        return jsonify({'error': 'Failed to fetch intraday prices'}), 500
-    intraday = resp.json()
-    # Fetch previous day's close
-    prev_close_url = f"{TIINGO_BASE_URL}/tiingo/daily/{ticker}/prices"
-    prev_close_params = {'token': TIINGO_API_KEY, 'limit': 2}
-    prev_close_resp = requests.get(prev_close_url, params=prev_close_params)
-    prev_close = None
-    if prev_close_resp.status_code == 200:
-        prices = prev_close_resp.json()
-        if len(prices) > 1:
-            prev_close = prices[1].get('close')
-        elif len(prices) == 1:
-            prev_close = prices[0].get('close')
-    return jsonify({'intraday': intraday, 'prevClose': prev_close})
+    filename = "mock/intraday.json"
+    try:
+        with open(filename, 'r') as f:
+            mock_data = json.load(f)
+        return mock_data
+    except FileNotFoundError:
+        print(f"Error: The file '{filename}' was not found.")
+        return None
+    except json.JSONDecodeError:
+        print(f"Error: Could not decode JSON from '{filename}'.")
+        return None
+
+# @app.route('/api/ticker/<ticker>/intraday', methods=['GET'])
+# def ticker_intraday(ticker):
+#     # Fetch intraday prices from Tiingo IEX endpoint, resampled to 4min
+#     url = f"{TIINGO_BASE_URL}/iex/{ticker}/prices"
+#     params = {'token': TIINGO_API_KEY, 'resampleFreq': '4min'}
+#     resp = requests.get(url, params=params)
+#     if resp.status_code != 200:
+#         return jsonify({'error': 'Failed to fetch intraday prices'}), 500
+#     intraday = resp.json()
+#     # Fetch previous day's close
+#     prev_close_url = f"{TIINGO_BASE_URL}/tiingo/daily/{ticker}/prices"
+#     prev_close_params = {'token': TIINGO_API_KEY, 'limit': 2}
+#     prev_close_resp = requests.get(prev_close_url, params=prev_close_params)
+#     prev_close = None
+#     if prev_close_resp.status_code == 200:
+#         prices = prev_close_resp.json()
+#         if len(prices) > 1:
+#             prev_close = prices[1].get('close')
+#         elif len(prices) == 1:
+#             prev_close = prices[0].get('close')
+#     return jsonify({'intraday': intraday, 'prevClose': prev_close})
 
 # @app.route('/api/ticker/<ticker>/summary', methods=['GET'])
 # def ticker_summary(ticker):
