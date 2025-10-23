@@ -38,28 +38,15 @@ def ticker_intraday(ticker):
     if resp.status_code != 200:
         return jsonify({'error': 'Failed to fetch intraday prices'}), 500
     intraday = resp.json()
-    # Fetch previous trading day's close, skipping weekends/holidays
+    # Fetch prevClose directly from Tiingo IEX top-of-book endpoint
+    topbook_url = f"{TIINGO_BASE_URL}/iex/"
+    topbook_params = {'token': TIINGO_API_KEY, 'tickers': ticker}
+    topbook_resp = requests.get(topbook_url, params=topbook_params)
     prev_close = None
-    # Use pandas to get previous two trading days (weekdays)
-    today = datetime.utcnow().date()
-    weekdays = pd.bdate_range(end=today, periods=2).date
-    start_window = weekdays[0]
-    end_window = weekdays[1]
-    prev_close_url = f"{TIINGO_BASE_URL}/tiingo/daily/{ticker}/prices"
-    prev_close_params = {
-        'token': TIINGO_API_KEY,
-        'startDate': start_window.strftime('%Y-%m-%d'),
-        'endDate': end_window.strftime('%Y-%m-%d')
-    }
-    prev_close_resp = requests.get(prev_close_url, params=prev_close_params)
-    if prev_close_resp.status_code == 200:
-        prices = prev_close_resp.json()
-        if prices:
-            prices.sort(key=lambda item: item.get('date', ''))
-            if len(prices) >= 2:
-                prev_close = prices[-2].get('close')
-            else:
-                prev_close = prices[-1].get('close')
+    if topbook_resp.status_code == 200:
+        topbook_data = topbook_resp.json()
+        if isinstance(topbook_data, list) and topbook_data:
+            prev_close = topbook_data[0].get('prevClose')
     return jsonify({'intraday': intraday, 'prevClose': prev_close})
 
 @app.route('/api/ticker/<ticker>/summary', methods=['GET'])
@@ -89,6 +76,9 @@ def ticker_news(ticker):
 def tickers_financials():
     # Accept tickers as comma-separated string: /api/ticker/financials?ticker=AAPL,MSFT,GOOG
     tickers = request.args.get('ticker', '')
+    gte = request.args.get('gte')
+    dimension = request.args.get('dimension')
+    mostRecent = request.args.get('mostRecent')
     if not tickers:
         return jsonify({'error': 'No tickers provided'}), 400
     tickers_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
@@ -97,6 +87,19 @@ def tickers_financials():
         'ticker': ','.join(tickers_list),
         'api_key': NASDAQ_API_KEY
     }
+    if gte:
+        params['calendardate.gte'] = gte
+    elif mostRecent and str(mostRecent).lower() in ('true', '1', 'yes'):
+        # Use last year's date for calendardate.gte
+        today = datetime.utcnow().date()
+        last_year = today.replace(year=today.year - 1)
+        params['calendardate.gte'] = last_year.strftime('%Y-%m-%d')
+
+    if (dimension):
+        params['dimension'] = dimension
+
+    print(params)
+    
     resp = requests.get(nasdaq_url, params=params)
     if resp.status_code != 200:
         return jsonify({'error': 'Failed to fetch NASDAQ fundamentals'}), 500
@@ -111,7 +114,7 @@ def tickers_financials():
         ticker = row[col_idx.get('ticker')]
         date = row[col_idx.get('calendardate')]
         # Only keep the latest date per ticker
-        if ticker not in ticker_latest or date > ticker_latest[ticker]['date']:
+        if ticker not in ticker_latest or (date and date > ticker_latest[ticker]['date']):
             ticker_latest[ticker] = {'row': row, 'date': date}
     def safe_div(num, denom):
         try:
