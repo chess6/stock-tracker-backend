@@ -3,7 +3,6 @@ from flask_cors import CORS
 import requests
 import os
 from dotenv import load_dotenv
-import json
 from datetime import datetime, timedelta
 import pandas as pd
 
@@ -34,20 +33,11 @@ def ticker_intraday(ticker):
     # Fetch intraday prices from Tiingo IEX endpoint, resampled to 4min
     url = f"{TIINGO_BASE_URL}/iex/{ticker}/prices"
     params = {'token': TIINGO_API_KEY, 'resampleFreq': '4min'}
-    resp = requests.get(url, params=params)
+    resp = requests.get(url, params=params, timeout=10)
     if resp.status_code != 200:
         return jsonify({'error': 'Failed to fetch intraday prices'}), 500
     intraday = resp.json()
-    # Fetch prevClose directly from Tiingo IEX top-of-book endpoint
-    topbook_url = f"{TIINGO_BASE_URL}/iex/"
-    topbook_params = {'token': TIINGO_API_KEY, 'tickers': ticker}
-    topbook_resp = requests.get(topbook_url, params=topbook_params)
-    prev_close = None
-    if topbook_resp.status_code == 200:
-        topbook_data = topbook_resp.json()
-        if isinstance(topbook_data, list) and topbook_data:
-            prev_close = topbook_data[0].get('prevClose')
-    return jsonify({'intraday': intraday, 'prevClose': prev_close})
+    return jsonify({'intraday': intraday})
 
 @app.route('/api/ticker/<ticker>/summary', methods=['GET'])
 def ticker_summary(ticker):
@@ -71,6 +61,127 @@ def ticker_news(ticker):
     news_params = {'tickers': ticker, 'token': TIINGO_API_KEY}
     news_resp = requests.get(news_url, params=news_params)
     return jsonify(news_resp.json())
+
+@app.route('/api/tickers/top', methods=['GET'])
+def tickers_top():
+    """Batch fetch top-of-book (last) for all requested tickers in one request."""
+    tickers = request.args.get('tickers', '')
+    if not tickers:
+        return jsonify({'quotes': {}})
+    tickers_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
+    url = f"{TIINGO_BASE_URL}/iex"
+    params = {
+        'tickers': ','.join(tickers_list),
+        'token': TIINGO_API_KEY
+    }
+    resp = requests.get(url, params=params)
+    if resp.status_code != 200:
+        return jsonify({'error': 'Failed to fetch top-of-book prices'}), 500
+    data = resp.json()
+    quotes = {}
+    if isinstance(data, list):
+        for item in data:
+            try:
+                t = (item.get('ticker') or '').upper()
+                if not t:
+                    continue
+                quotes[t] = {
+                    'last': item.get('last'),
+                    'tngoLast': item.get('tngoLast'),
+                    'bidPrice': item.get('bidPrice'),
+                    'askPrice': item.get('askPrice'),
+                    'timestamp': item.get('lastSaleTimestamp') or item.get('timestamp'),
+                    'name': item.get('name') or t,
+                    'prevClose': item.get('prevClose'),
+                    'open': item.get('open'),
+                    'high': item.get('high'),
+                    'low': item.get('low'),
+                }
+            except Exception:
+                continue
+    return jsonify({'quotes': quotes})
+
+@app.route('/api/tickers/daily-change', methods=['GET'])
+def tickers_daily_change():
+    """Return prevClose (last business day) and today close for each ticker.
+    Uses Tiingo daily prices endpoint per ticker and aggregates results.
+    """
+    tickers = request.args.get('tickers', '')
+    if not tickers:
+        return jsonify({'changes': {}})
+    tickers_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
+    changes = {}
+    today = datetime.utcnow().date()
+    # Determine latest and previous business days relative to today
+    last_two_bdays = pd.bdate_range(end=today, periods=2)
+    if len(last_two_bdays) >= 2:
+        prev_bday = last_two_bdays[-2].date()
+        latest_bday = last_two_bdays[-1].date()
+    elif len(last_two_bdays) == 1:
+        prev_bday = last_two_bdays[-1].date() - timedelta(days=1)
+        latest_bday = last_two_bdays[-1].date()
+    else:
+        prev_bday = today - timedelta(days=2)
+        latest_bday = today - timedelta(days=1)
+    prev_bday_str = prev_bday.strftime('%Y-%m-%d')
+    latest_bday_str = latest_bday.strftime('%Y-%m-%d')
+    # For meta fields to preserve compat
+    today_str = today.strftime('%Y-%m-%d')
+    last_bday_meta = pd.bdate_range(end=today - timedelta(days=1), periods=1)
+    last_bday_str = (last_bday_meta[-1].date() if len(last_bday_meta) else today - timedelta(days=1)).strftime('%Y-%m-%d')
+    for t in tickers_list:
+        try:
+            daily_url = f"{TIINGO_BASE_URL}/tiingo/daily/{t}/prices"
+            params = {
+                'token': TIINGO_API_KEY,
+                'startDate': prev_bday_str,
+                'endDate': latest_bday_str
+            }
+            r = requests.get(daily_url, params=params, timeout=8)
+            prev_close = None
+            today_close = None
+            if r.status_code == 200:
+                arr = r.json() or []
+                for row in arr:
+                    d = (row.get('date') or '')[:10]
+                    if d == prev_bday_str:
+                        prev_close = row.get('close')
+                    if d == latest_bday_str:
+                        today_close = row.get('close')
+            # Fallback: if latest day's close not present (holiday corrections), roll latest back one business day
+            if today_close is None:
+                # Move window back by one additional business day
+                three_bdays = pd.bdate_range(end=prev_bday, periods=2)
+                if len(three_bdays) >= 2:
+                    older_prev = three_bdays[-2].date().strftime('%Y-%m-%d')
+                    newer_prev = three_bdays[-1].date().strftime('%Y-%m-%d')
+                    r3 = requests.get(
+                        daily_url,
+                        params={'token': TIINGO_API_KEY, 'startDate': older_prev, 'endDate': newer_prev},
+                        timeout=8
+                    )
+                    if r3.status_code == 200:
+                        arr3 = r3.json() or []
+                        # assign today_close as newer_prev, prev_close as older_prev if available
+                        for row in arr3:
+                            d = (row.get('date') or '')[:10]
+                            if d == newer_prev:
+                                today_close = row.get('close')
+                            if d == older_prev:
+                                prev_close = prev_close or row.get('close')
+            changes[t] = {
+                'prevClose': prev_close,
+                'todayClose': today_close,
+            }
+        except Exception:
+            changes[t] = {
+                'prevClose': None,
+                'todayClose': None,
+            }
+    return jsonify({'changes': changes, 'meta': {
+        'lastBusinessDay': last_bday_str,
+        'today': today_str
+    }})
 
 @app.route('/api/ticker/financials', methods=['GET'])
 def tickers_financials():
