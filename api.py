@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import pandas as pd
+import pandas_market_calendars as mcal
 
 load_dotenv()
 
@@ -112,23 +113,34 @@ def tickers_daily_change():
     tickers_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
     changes = {}
     today = datetime.utcnow().date()
-    # Determine latest and previous business days relative to today
-    last_two_bdays = pd.bdate_range(end=today, periods=2)
-    if len(last_two_bdays) >= 2:
-        prev_bday = last_two_bdays[-2].date()
-        latest_bday = last_two_bdays[-1].date()
-    elif len(last_two_bdays) == 1:
-        prev_bday = last_two_bdays[-1].date() - timedelta(days=1)
-        latest_bday = last_two_bdays[-1].date()
+    # Fetch last two valid market close dates using Tiingo daily prices for the last 6 days
+    # Use the first ticker to determine close dates
+    close_dates = []
+    if tickers_list:
+        sample_ticker = tickers_list[0]
+        start_date = (today - timedelta(days=6)).strftime('%Y-%m-%d')
+        daily_url = f"{TIINGO_BASE_URL}/tiingo/daily/{sample_ticker}/prices"
+        params = {
+            'token': TIINGO_API_KEY,
+            'startDate': start_date
+        }
+        r = requests.get(daily_url, params=params, timeout=8)
+        if r.status_code == 200:
+            arr = r.json() or []
+            close_dates = [ (row.get('date') or '')[:10] for row in arr if row.get('close') is not None ]
+    if len(close_dates) >= 2:
+        prev_bday_str = close_dates[-2]
+        latest_bday_str = close_dates[-1]
+    elif len(close_dates) == 1:
+        prev_bday_str = close_dates[-1]
+        latest_bday_str = close_dates[-1]
     else:
-        prev_bday = today - timedelta(days=2)
-        latest_bday = today - timedelta(days=1)
-    prev_bday_str = prev_bday.strftime('%Y-%m-%d')
-    latest_bday_str = latest_bday.strftime('%Y-%m-%d')
+        prev_bday_str = (today - timedelta(days=2)).strftime('%Y-%m-%d')
+        latest_bday_str = (today - timedelta(days=1)).strftime('%Y-%m-%d')
+    print(f"Determined market close days - Previous: {prev_bday_str}, Latest: {latest_bday_str}")
     # For meta fields to preserve compat
     today_str = today.strftime('%Y-%m-%d')
-    last_bday_meta = pd.bdate_range(end=today - timedelta(days=1), periods=1)
-    last_bday_str = (last_bday_meta[-1].date() if len(last_bday_meta) else today - timedelta(days=1)).strftime('%Y-%m-%d')
+    last_bday_str = prev_bday_str
     for t in tickers_list:
         try:
             daily_url = f"{TIINGO_BASE_URL}/tiingo/daily/{t}/prices"
