@@ -38,7 +38,27 @@ def ticker_intraday(ticker):
     if resp.status_code != 200:
         return jsonify({'error': 'Failed to fetch intraday prices'}), 500
     intraday = resp.json()
-    return jsonify({'intraday': intraday})
+
+    # Fetch ticker metadata from NASDAQ SHARADAR/TICKERS
+    nasdaq_url = "https://data.nasdaq.com/api/v3/datatables/SHARADAR/TICKERS"
+    nasdaq_params = {
+        'ticker': ticker.upper(),
+        'api_key': NASDAQ_API_KEY,
+        'table': 'SF1'
+    }
+    meta_resp = requests.get(nasdaq_url, params=nasdaq_params, timeout=10)
+    tickerMeta = None
+    if meta_resp.status_code == 200:
+        meta_data = meta_resp.json()
+        datatable = meta_data.get('datatable', {})
+        columns = datatable.get('columns', [])
+        data = datatable.get('data', [])
+        if data and columns:
+            col_names = [col['name'] for col in columns]
+            # Use first row (should be only one for ticker)
+            row = data[0]
+            tickerMeta = {col_names[i]: row[i] for i in range(len(col_names))}
+    return jsonify({'intraday': intraday, 'tickerMeta': tickerMeta})
 
 @app.route('/api/ticker/<ticker>/summary', methods=['GET'])
 def ticker_summary(ticker):
