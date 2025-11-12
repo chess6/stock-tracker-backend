@@ -125,7 +125,7 @@ def tickers_top():
 @app.route('/api/tickers/daily-change', methods=['GET'])
 def tickers_daily_change():
     """Return prevClose (last business day) and today close for each ticker.
-    Uses Tiingo daily prices endpoint per ticker and aggregates results.
+    Uses Nasdaq Data Link SHARADAR/SEP batch endpoint for daily closes, falls back to Tiingo if needed.
     """
     tickers = request.args.get('tickers', '')
     if not tickers:
@@ -133,87 +133,51 @@ def tickers_daily_change():
     tickers_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
     changes = {}
     today = datetime.utcnow().date()
-    # Fetch last two valid market close dates using Tiingo daily prices for the last 6 days
-    # Use the first ticker to determine close dates
-    close_dates = []
-    if tickers_list:
-        sample_ticker = tickers_list[0]
-        start_date = (today - timedelta(days=6)).strftime('%Y-%m-%d')
-        daily_url = f"{TIINGO_BASE_URL}/tiingo/daily/{sample_ticker}/prices"
-        params = {
-            'token': TIINGO_API_KEY,
-            'startDate': start_date
-        }
-        r = requests.get(daily_url, params=params, timeout=8)
-        if r.status_code == 200:
-            arr = r.json() or []
-            close_dates = [ (row.get('date') or '')[:10] for row in arr if row.get('close') is not None ]
-    if len(close_dates) >= 2:
-        prev_bday_str = close_dates[-2]
-        latest_bday_str = close_dates[-1]
-    elif len(close_dates) == 1:
-        prev_bday_str = close_dates[-1]
-        latest_bday_str = close_dates[-1]
-    else:
-        prev_bday_str = (today - timedelta(days=2)).strftime('%Y-%m-%d')
-        latest_bday_str = (today - timedelta(days=1)).strftime('%Y-%m-%d')
+    # Determine last two valid market close dates using pandas_market_calendars
+    nyse = mcal.get_calendar('NYSE')
+    schedule = nyse.schedule(start_date=(today - timedelta(days=10)), end_date=today)
+    close_dates = list(schedule.index.strftime('%Y-%m-%d'))
+    prev_bday_str = close_dates[-2]
+    latest_bday_str = close_dates[-1]
     print(f"Determined market close days - Previous: {prev_bday_str}, Latest: {latest_bday_str}")
-    # For meta fields to preserve compat
     today_str = today.strftime('%Y-%m-%d')
     last_bday_str = prev_bday_str
-    for t in tickers_list:
-        try:
-            daily_url = f"{TIINGO_BASE_URL}/tiingo/daily/{t}/prices"
-            params = {
-                'token': TIINGO_API_KEY,
-                'startDate': prev_bday_str,
-                'endDate': latest_bday_str
-            }
-            r = requests.get(daily_url, params=params, timeout=8)
+    # Try Nasdaq Data Link batch fetch first
+    nasdaq_url = "https://data.nasdaq.com/api/v3/datatables/SHARADAR/SEP"
+    params = {
+        'ticker': ','.join(tickers_list),
+        'date': f"{prev_bday_str},{latest_bday_str}",
+        'api_key': NASDAQ_API_KEY
+    }
+    resp = requests.get(nasdaq_url, params=params, timeout=10)
+    if resp.status_code == 200:
+        data = resp.json()
+        rows = data.get('datatable', {}).get('data', [])
+        columns = data.get('datatable', {}).get('columns', [])
+        col_idx = {col['name']: idx for idx, col in enumerate(columns)}
+        # Build changes dict from batch response
+        for t in tickers_list:
             prev_close = None
             today_close = None
-            if r.status_code == 200:
-                arr = r.json() or []
-                for row in arr:
-                    d = (row.get('date') or '')[:10]
-                    if d == prev_bday_str:
-                        prev_close = row.get('close')
-                    if d == latest_bday_str:
-                        today_close = row.get('close')
-            # Fallback: if latest day's close not present (holiday corrections), roll latest back one business day
-            if today_close is None:
-                # Move window back by one additional business day
-                three_bdays = pd.bdate_range(end=prev_bday, periods=2)
-                if len(three_bdays) >= 2:
-                    older_prev = three_bdays[-2].date().strftime('%Y-%m-%d')
-                    newer_prev = three_bdays[-1].date().strftime('%Y-%m-%d')
-                    r3 = requests.get(
-                        daily_url,
-                        params={'token': TIINGO_API_KEY, 'startDate': older_prev, 'endDate': newer_prev},
-                        timeout=8
-                    )
-                    if r3.status_code == 200:
-                        arr3 = r3.json() or []
-                        # assign today_close as newer_prev, prev_close as older_prev if available
-                        for row in arr3:
-                            d = (row.get('date') or '')[:10]
-                            if d == newer_prev:
-                                today_close = row.get('close')
-                            if d == older_prev:
-                                prev_close = prev_close or row.get('close')
+            for row in rows:
+                ticker = row[col_idx.get('ticker')]
+                date = row[col_idx.get('date')]
+                close = row[col_idx.get('close')]
+                if ticker == t:
+                    if date == prev_bday_str:
+                        prev_close = close
+                    if date == latest_bday_str:
+                        today_close = close
             changes[t] = {
                 'prevClose': prev_close,
                 'todayClose': today_close,
             }
-        except Exception:
-            changes[t] = {
-                'prevClose': None,
-                'todayClose': None,
-            }
-    return jsonify({'changes': changes, 'meta': {
-        'lastBusinessDay': last_bday_str,
-        'today': today_str
-    }})
+        return jsonify({'changes': changes, 'meta': {
+            'lastBusinessDay': last_bday_str,
+            'today': today_str
+        }})
+    else:
+        return jsonify({'error': 'Failed to fetch Nasdaq daily closes', 'status_code': resp.status_code}), 500
 
 @app.route('/api/ticker/financials', methods=['GET'])
 def tickers_financials():
@@ -241,7 +205,8 @@ def tickers_financials():
     if (dimension):
         params['dimension'] = dimension
 
-    print(params)
+    query_str = '&'.join(f'{k}={v}' for k, v in params.items())
+    print(f"Fetching NASDAQ financials: {nasdaq_url}?{query_str}")
     
     resp = requests.get(nasdaq_url, params=params)
     if resp.status_code != 200:
@@ -251,14 +216,16 @@ def tickers_financials():
     rows = data.get('datatable', {}).get('data', [])
     columns = data.get('datatable', {}).get('columns', [])
     col_idx = {col['name']: idx for idx, col in enumerate(columns)}
-    # Group rows by ticker, pick latest row for each ticker
-    ticker_latest = {}
+    # Group rows by (ticker, calendardate, dimension), keep only the row with latest lastupdated
+    latest_rows = {}
     for row in rows:
         ticker = row[col_idx.get('ticker')]
-        date = row[col_idx.get('calendardate')]
-        # Only keep the latest date per ticker
-        if ticker not in ticker_latest or (date and date > ticker_latest[ticker]['date']):
-            ticker_latest[ticker] = {'row': row, 'date': date}
+        calendardate = row[col_idx.get('calendardate')]
+        dimension = row[col_idx.get('dimension')]
+        lastupdated = row[col_idx.get('lastupdated')]
+        key = (ticker, calendardate, dimension)
+        if key not in latest_rows or (lastupdated and lastupdated > latest_rows[key]['lastupdated']):
+            latest_rows[key] = {'row': row, 'lastupdated': lastupdated}
     def safe_div(num, denom):
         try:
             if num is None or denom in (None, 0):
@@ -266,8 +233,27 @@ def tickers_financials():
             return num / denom
         except Exception:
             return None
+    # Build a deduped list of rows for the raw datatable response
+    deduped_rows = [info['row'] for info in latest_rows.values()]
+    # Sort deterministically: by ticker, calendardate, dimension
+    def _sort_key(r):
+        # Sort by ticker ASC, calendardate DESC, dimension ASC
+        # For descending date, use reverse sort or negative value
+        ticker = r[col_idx.get('ticker')]
+        calendardate = r[col_idx.get('calendardate')] or ''
+        dimension = r[col_idx.get('dimension')] or ''
+        return (ticker, -int(calendardate.replace('-', '')) if calendardate else 0, dimension)
+    deduped_rows.sort(key=_sort_key)
+    # Replace raw datatable data with deduped rows so frontend sees clean data
+    if isinstance(data, dict) and 'datatable' in data and isinstance(data['datatable'], dict):
+        before = len(data['datatable'].get('data', []) or [])
+        data['datatable']['data'] = deduped_rows
+        after = len(deduped_rows)
+        print(f"Deduped NASDAQ SF1 rows: {before} -> {after}")
+
     results = {}
-    for ticker, info in ticker_latest.items():
+    for key, info in latest_rows.items():
+        ticker, calendardate, dimension = key
         latest = info['row']
         def colval(name):
             idx = col_idx.get(name)
@@ -314,6 +300,7 @@ def tickers_financials():
             'cfop': cashFlowOpsPerShare,
             'sfcfp': sfcfPerShare
         }
+        # Use ticker as key, but you could also use (ticker, calendardate, dimension) if needed
         results[ticker] = metrics
     return jsonify({'metrics': results, 'raw': data})
 
