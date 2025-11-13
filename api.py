@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import pandas as pd
 import pandas_market_calendars as mcal
+import json
+from dateutil.relativedelta import relativedelta
 
 load_dotenv()
 
@@ -303,6 +305,142 @@ def tickers_financials():
         # Use ticker as key, but you could also use (ticker, calendardate, dimension) if needed
         results[ticker] = metrics
     return jsonify({'metrics': results, 'raw': data})
+
+
+@app.route('/api/insiders/buying-sums', methods=['GET'])
+def insiders_buying_sums():
+    """
+    Aggregate insider buying (transactionvalue) over the last 6/3/1 months by ticker.
+    - Accepts optional query param 'tickers' (comma-separated) to limit aggregation.
+    - Uses SHARADAR/SF2 with securityadcode=NA,DA (acquisitions) and filingdate.gte last 6 months.
+    - Sums positive transactionvalue by ticker for windows: 6M, 3M, 1M based on transactiondate (fallback filingdate).
+    Response: { rows: [ { ticker, company, buy6m, buy3m, buy1m }, ... ] }
+    """
+    tickers_param = request.args.get('tickers', '')
+    tickers_list = [t.strip().upper() for t in tickers_param.split(',') if t.strip()]
+    today = datetime.utcnow().date()
+    six_months_ago = (today - relativedelta(months=6))
+    three_months_ago = (today - relativedelta(months=3))
+    one_month_ago = (today - relativedelta(months=1))
+
+    # Helper to parse Data Link datatable shape
+    def parse_datatable(payload):
+        datatable = payload.get('datatable', {}) if isinstance(payload, dict) else {}
+        cols = datatable.get('columns', [])
+        data = datatable.get('data', [])
+        col_idx = {c['name']: i for i, c in enumerate(cols)}
+        return data, col_idx
+
+    # Print actual request URLs for 6m, 3m, 1m
+    nasdaq_url = "https://data.nasdaq.com/api/v3/datatables/SHARADAR/SF2"
+    params_6m = {
+        'securityadcode': 'NA,ND',
+        'filingdate.gte': six_months_ago.strftime('%Y-%m-%d'),
+        'transactionvalue.gte': 100000,
+        'qopts.columns': 'ticker,issuername,filingdate,transactiondate,transactionvalue,securityadcode,transactioncode',
+        'api_key': NASDAQ_API_KEY,
+    }
+    params_3m = params_6m.copy()
+    params_3m['filingdate.gte'] = three_months_ago.strftime('%Y-%m-%d')
+    params_1m = params_6m.copy()
+    params_1m['filingdate.gte'] = one_month_ago.strftime('%Y-%m-%d')
+    if tickers_list:
+        params_6m['ticker'] = ','.join(tickers_list)
+        params_3m['ticker'] = ','.join(tickers_list)
+        params_1m['ticker'] = ','.join(tickers_list)
+
+    def url_with_params(base, params):
+        from urllib.parse import urlencode
+        return f"{base}?{urlencode(params)}"
+
+    print("[Insider Buying] 6M URL:", url_with_params(nasdaq_url, params_6m))
+    print("[Insider Buying] 3M URL:", url_with_params(nasdaq_url, params_3m))
+    print("[Insider Buying] 1M URL:", url_with_params(nasdaq_url, params_1m))
+
+    # Fetch all pages using cursor-based pagination
+    rows = []
+    col_idx = {}
+    cursor_id = None
+    first = True
+    while True:
+        params = params_6m.copy()
+        if not first and cursor_id:
+            params['qopts.cursor_id'] = cursor_id
+        try:
+            resp = requests.get(nasdaq_url, params=params, timeout=30)
+            if resp.status_code == 200:
+                payload = resp.json()
+                page_rows, page_col_idx = parse_datatable(payload)
+                if first:
+                    col_idx = page_col_idx
+                    first = False
+                rows.extend(page_rows)
+                cursor_id = payload.get('meta', {}).get('next_cursor_id')
+                if not cursor_id:
+                    break
+            else:
+                break
+        except Exception:
+            break
+
+    # Aggregate
+    ticker_sums = {}
+    def to_date(s):
+        if not s:
+            return None
+        try:
+            return datetime.strptime(str(s)[:10], '%Y-%m-%d').date()
+        except Exception:
+            return None
+
+    for r in rows:
+        t = r[col_idx.get('ticker')] if 'ticker' in col_idx else None
+        if not t:
+            continue
+        if tickers_list and t.upper() not in tickers_list:
+            continue
+        company = r[col_idx.get('issuername')] if 'issuername' in col_idx else None
+        filingdate = to_date(r[col_idx.get('filingdate')] if 'filingdate' in col_idx else None)
+        transdate = to_date(r[col_idx.get('transactiondate')] if 'transactiondate' in col_idx else None)
+        date_used = transdate or filingdate
+        if date_used is None:
+            continue
+        transaction_code = r[col_idx.get('transactioncode')] if 'transactioncode' in col_idx else None
+        if transaction_code not in ('P', 'S'):
+            continue
+        securityadcode = r[col_idx.get('securityadcode')] if 'securityadcode' in col_idx else None
+        try:
+            val_raw = r[col_idx.get('transactionvalue')] if 'transactionvalue' in col_idx else None
+            val = float(val_raw) if val_raw is not None else 0.0
+        except Exception:
+            val = 0.0
+        # Only sum positive values
+        if val <= 0:
+            continue
+
+        # NA (acquisition): add, ND (disposition): subtract
+        if securityadcode == 'ND':
+            val = -val
+
+        agg = ticker_sums.setdefault(t, {'ticker': t, 'company': company or '', 'buy6m': 0.0, 'buy3m': 0.0, 'buy1m': 0.0})
+        if date_used >= six_months_ago:
+            agg['buy6m'] += val
+            if date_used >= three_months_ago:
+                agg['buy3m'] += val
+                if date_used >= one_month_ago:
+                    agg['buy1m'] += val
+
+    # Build result list
+    result_rows = list(ticker_sums.values())
+    result_rows.sort(key=lambda x: x.get('buy6m', 0.0), reverse=True)
+
+    return jsonify({
+        'rows': result_rows,
+        'meta': {
+            'from': six_months_ago.strftime('%Y-%m-%d'),
+            'generatedAt': datetime.utcnow().isoformat() + 'Z'
+        }
+    })
 
 ### Mock endpoints for development
 # @app.route('/api/ticker/<ticker>/intraday', methods=['GET'])
