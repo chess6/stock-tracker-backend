@@ -1,0 +1,211 @@
+from __future__ import annotations
+
+import hashlib
+import re
+from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
+from urllib.parse import quote_plus, urlparse
+from xml.etree import ElementTree
+
+import requests
+
+from ..repositories import Repository, utc_now_iso
+
+try:
+    import feedparser  # type: ignore
+except ImportError:  # pragma: no cover
+    feedparser = None
+
+try:
+    import trafilatura  # type: ignore
+except ImportError:  # pragma: no cover
+    trafilatura = None
+
+
+def build_google_news_rss_url(query: str) -> str:
+    return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+
+
+DEFAULT_FEEDS = [
+    {"name": "Reuters Business", "feed_url": "https://feeds.reuters.com/reuters/businessNews", "category": "finance"},
+    {"name": "CNBC Top News", "feed_url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114", "category": "finance"},
+    {"name": "MarketWatch Top Stories", "feed_url": "http://feeds.marketwatch.com/marketwatch/topstories/", "category": "finance"},
+    {"name": "Techmeme", "feed_url": "https://www.techmeme.com/feed.xml", "category": "tech"},
+    {"name": "Hacker News Front Page", "feed_url": "https://hnrss.org/frontpage", "category": "tech"},
+    {"name": "Lobsters", "feed_url": "https://lobste.rs/rss", "category": "tech"},
+    {"name": "Semiconductor Engineering", "feed_url": "https://semiengineering.com/feed/", "category": "semis"},
+    {"name": "BleepingComputer", "feed_url": "https://www.bleepingcomputer.com/feed/", "category": "security"},
+    {"name": "AWS Blog", "feed_url": "https://aws.amazon.com/blogs/aws/feed/", "category": "cloud"},
+    {"name": "Cloudflare Blog", "feed_url": "https://blog.cloudflare.com/rss/", "category": "cloud"},
+    {"name": "SEC Press Releases", "feed_url": "https://www.sec.gov/news/pressreleases.rss", "category": "regulatory"},
+    {"name": "Reddit r/stocks", "feed_url": "https://www.reddit.com/r/stocks/.rss", "category": "community"},
+    {"name": "Reddit r/investing", "feed_url": "https://www.reddit.com/r/investing/.rss", "category": "community"},
+    {"name": "Reddit r/SecurityAnalysis", "feed_url": "https://www.reddit.com/r/SecurityAnalysis/.rss", "category": "community"},
+    {"name": "Google News: Stock Market", "feed_url": build_google_news_rss_url("stock market"), "category": "finance"},
+    {"name": "Google News: Semiconductors", "feed_url": build_google_news_rss_url("semiconductor industry"), "category": "semis"},
+    {"name": "Google News: Cloud Computing", "feed_url": build_google_news_rss_url("cloud computing"), "category": "cloud"},
+    {"name": "Google News: Cybersecurity", "feed_url": build_google_news_rss_url("cybersecurity"), "category": "security"},
+]
+
+
+class _HTMLStripper(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        stripped = data.strip()
+        if stripped:
+            self.parts.append(stripped)
+
+    def get_text(self) -> str:
+        return " ".join(self.parts)
+
+
+def strip_html(html: str) -> str:
+    parser = _HTMLStripper()
+    parser.feed(html)
+    return parser.get_text()
+
+
+def url_hash(url: str) -> str:
+    normalized = url.strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def parse_feed(xml_text: str) -> list[dict]:
+    if feedparser is not None:
+        parsed = feedparser.parse(xml_text)
+        return [
+            {
+                "title": entry.get("title"),
+                "link": entry.get("link"),
+                "summary": entry.get("summary") or entry.get("description"),
+                "published": entry.get("published") or entry.get("updated"),
+            }
+            for entry in parsed.entries
+            if entry.get("link") and entry.get("title")
+        ]
+
+    root = ElementTree.fromstring(xml_text)
+    items = []
+    for item in root.findall(".//item"):
+        title = item.findtext("title")
+        link = item.findtext("link")
+        summary = item.findtext("description")
+        published = item.findtext("pubDate")
+        if title and link:
+            items.append({"title": title, "link": link, "summary": summary, "published": published})
+    return items
+
+
+def extract_article_text(html_text: str) -> str:
+    if trafilatura is not None:
+        extracted = trafilatura.extract(html_text)
+        if extracted:
+            return extracted
+    return strip_html(html_text)
+
+
+class NewsService:
+    def __init__(self, repo: Repository, session: requests.Session | None = None, timeout: int = 20, cache_ttl_seconds: int = 3600) -> None:
+        self.repo = repo
+        self.session = session or requests.Session()
+        self.timeout = timeout
+        self.cache_ttl_seconds = cache_ttl_seconds
+
+    def _fetch_cached_text(self, url: str, cache_namespace: str) -> str:
+        cache_key = f"{cache_namespace}:{url}"
+        cached = self.repo.get_cached_http_response(cache_key)
+        if cached and cached.get("expires_at"):
+            expires_at = datetime.fromisoformat(cached["expires_at"].replace("Z", "+00:00"))
+            if expires_at > datetime.now(timezone.utc):
+                return cached["response_body"] or ""
+        response = self.session.get(url, timeout=self.timeout)
+        response.raise_for_status()
+        body = response.text
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=self.cache_ttl_seconds)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        self.repo.put_cached_http_response(cache_key, url, response.status_code, body, expires_at)
+        return body
+
+    def _match_companies(self, text: str) -> list[tuple[int, str, float]]:
+        matches = []
+        uppercase_text = f" {text.upper()} "
+        for company in self.repo.list_companies_for_matching():
+            ticker = company["ticker"].upper()
+            if re.search(rf"(?<![A-Z]){re.escape(ticker)}(?![A-Z])", uppercase_text):
+                matches.append((company["id"], "ticker", 0.95))
+                continue
+            name = (company["name"] or "").upper()
+            if name and name in uppercase_text:
+                matches.append((company["id"], "company_name", 0.75))
+        return matches
+
+    def ingest_feed(self, feed_url: str, name: str, category: str = "general") -> dict:
+        feed_body = self._fetch_cached_text(feed_url, "feed")
+        entries = parse_feed(feed_body)
+        feed_id = self.repo.upsert_feed(
+            {
+                "name": name,
+                "feed_url": feed_url,
+                "domain": urlparse(feed_url).netloc,
+                "category": category,
+                "last_polled_at": utc_now_iso(),
+            }
+        )
+        article_count = 0
+        for entry in entries:
+            article_url = entry["link"]
+            html = ""
+            body_text = ""
+            try:
+                html = self._fetch_cached_text(article_url, "article")
+                body_text = extract_article_text(html)
+            except requests.RequestException:
+                body_text = strip_html(entry.get("summary") or "")
+            article_id = self.repo.upsert_article(
+                {
+                    "canonical_url": article_url,
+                    "url_hash": url_hash(article_url),
+                    "title": entry["title"],
+                    "summary": strip_html(entry.get("summary") or ""),
+                    "body_text": body_text,
+                    "source_domain": urlparse(article_url).netloc,
+                    "published_at": entry.get("published"),
+                    "fetched_at": utc_now_iso(),
+                    "content_hash": text_hash(body_text or entry["title"]),
+                    "raw_source": f"feed:{feed_id}",
+                }
+            )
+            match_text = " ".join(filter(None, [entry.get("title"), entry.get("summary"), body_text]))
+            for company_id, match_type, confidence in self._match_companies(match_text):
+                self.repo.link_article_company(article_id, company_id, match_type, confidence)
+            article_count += 1
+        return {"feedId": feed_id, "articlesProcessed": article_count}
+
+    def default_feeds(self) -> list[dict]:
+        return list(DEFAULT_FEEDS)
+
+    def ingest_default_feeds(self) -> dict:
+        results = []
+        total_articles = 0
+        for feed in self.default_feeds():
+            result = self.ingest_feed(feed["feed_url"], feed["name"], feed["category"])
+            total_articles += result["articlesProcessed"]
+            results.append(
+                {
+                    "name": feed["name"],
+                    "category": feed["category"],
+                    "feed_url": feed["feed_url"],
+                    "articlesProcessed": result["articlesProcessed"],
+                }
+            )
+        return {
+            "feedsProcessed": len(results),
+            "articlesProcessed": total_articles,
+            "results": results,
+        }

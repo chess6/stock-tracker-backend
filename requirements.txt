@@ -4,3 +4,7 @@ requests
 python-dotenv
 pandas
 pandas_market_calendars
+feedparser
+trafilatura
+rapidfuzz
+pytest
