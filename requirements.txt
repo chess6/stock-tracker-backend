@@ -10,3 +10,9 @@ rapidfuzz
 yfinance
 apscheduler
 pytest
+fastapi>=0.94
+uvicorn
+sqlalchemy>=2.0
+pydantic>=1.10,<2
+httpx
+redis

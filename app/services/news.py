@@ -122,6 +122,19 @@ class NewsService:
         self.timeout = timeout
         self.cache_ttl_seconds = cache_ttl_seconds
 
+    @staticmethod
+    def _emit_news_ingested(article_id: int, tickers: list[str], sentiment_label: str | None) -> None:
+        try:
+            from orchestration.services.bridge import emit_news_ingested
+
+            emit_news_ingested(
+                article_id,
+                tickers=tickers,
+                sentiment_label=sentiment_label,
+            )
+        except Exception:
+            pass
+
     def _fetch_cached_text(self, url: str, cache_namespace: str, *, force_refresh: bool = False) -> str:
         cache_key = f"{cache_namespace}:{url}"
         cached = None if force_refresh else self.repo.get_cached_http_response(cache_key)
@@ -200,8 +213,15 @@ class NewsService:
                 storage_key=simhash_fingerprint(enrichment_text),
             )
             match_text = " ".join(filter(None, [entry.get("title"), entry.get("summary"), body_text]))
+            linked_tickers = []
             for company_id, match_type, confidence in self._match_companies(match_text):
                 self.repo.link_article_company(article_id, company_id, match_type, confidence)
+                company = self.repo.conn.execute(
+                    "SELECT ticker FROM companies WHERE id = ?", (company_id,)
+                ).fetchone()
+                if company and company[0]:
+                    linked_tickers.append(company[0])
+            self._emit_news_ingested(article_id, linked_tickers, sentiment_label)
             article_count += 1
         return {"feedId": feed_id, "articlesProcessed": article_count}
 

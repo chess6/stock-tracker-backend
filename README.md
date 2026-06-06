@@ -14,6 +14,26 @@ Local-data-first: admin/bootstrap endpoints fill SQLite; the UI reads from cache
 | Background worker | `worker.py` |
 | Shell helpers | `start.sh`, `stop.sh`, `worker.sh`, `worker_stop.sh`, `bootstrap.sh`, `refresh_data.sh` |
 | CLI tester | `api_tester.py` |
+| AI orchestrator | `orchestration/` — event-driven agents (see below) |
+
+## AI orchestration layer
+
+Event-driven agents propose actions; validators execute only safe, approved operations.
+
+```bash
+sh orchestrator_start.sh       # event loop (python -m orchestration.worker)
+sh orchestrator_api_start.sh   # FastAPI dashboard http://127.0.0.1:5001
+```
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /dashboard` | Active agents, failures, approvals, confidence scores |
+| `GET /events` | Pending/failed events |
+| `POST /approvals/{id}/approve` | Human approval gate |
+
+Docs: `orchestration/ARCHITECTURE.md`, `orchestration/MIGRATION_PLAN.md`
+
+Optional env: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `REDIS_URL`, `AI_DEFAULT_PROVIDER=ollama`
 
 ## Prerequisites
 

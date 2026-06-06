@@ -31,7 +31,24 @@ class WorkerRunner:
         except Exception as exc:
             logger.exception("Job %s (%s) failed", job["id"], job["job_type"])
             self.ctx.repo.fail_job(job["id"], str(exc))
+            self._emit_fetch_failed(job, exc)
         return True
+
+    def _emit_fetch_failed(self, job: dict, exc: Exception) -> None:
+        try:
+            from orchestration.services.bridge import emit_fetch_failed
+
+            payload = job.get("payload") or {}
+            emit_fetch_failed(
+                failure_type=job.get("job_type", "unknown"),
+                source="ingestion_worker",
+                error=str(exc),
+                job_type=job.get("job_type"),
+                tickers=payload.get("tickers", []),
+                exc=exc,
+            )
+        except Exception:
+            logger.debug("Orchestration bridge unavailable; skipping fetch_failed event")
 
     def run_forever(self) -> None:
         logger.info("Worker started")

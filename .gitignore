@@ -1,5 +1,7 @@
 .backend.pid
 .worker.pid
+.orchestrator.pid
+.orchestrator_api.pid
 *.out
 .env
 data/*.sqlite3
