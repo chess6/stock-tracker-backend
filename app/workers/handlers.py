@@ -34,6 +34,7 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         return ctx.news.ingest_default_feeds(
             extract_articles=payload.get("extract_articles", True),
             max_articles_per_feed=payload.get("max_articles_per_feed"),
+            force_refresh=payload.get("force_refresh", True),
         )
 
     def refresh_prices(payload: dict) -> dict:

@@ -393,6 +393,28 @@ class Repository:
         )
         self.conn.commit()
 
+    def upsert_embedding_metadata(
+        self,
+        article_id: int,
+        *,
+        model: str,
+        content_hash: str | None = None,
+        storage_key: str | None = None,
+        vector_dimensions: int | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO embeddings_metadata (article_id, model, content_hash, storage_key, vector_dimensions)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(article_id, model) DO UPDATE SET
+                content_hash=excluded.content_hash,
+                storage_key=excluded.storage_key,
+                vector_dimensions=excluded.vector_dimensions
+            """,
+            (article_id, model, content_hash, storage_key, vector_dimensions),
+        )
+        self.conn.commit()
+
     def list_unique_articles(
         self,
         *,
@@ -401,6 +423,7 @@ class Repository:
         q: str | None = None,
         category: str | None = None,
         source_domain: str | None = None,
+        tickers: list[str] | None = None,
     ) -> dict:
         clauses = ["a.duplicate_of_article_id IS NULL"]
         params: list = []
@@ -421,6 +444,21 @@ class Repository:
                 """
             )
             params.append(category.lower().strip())
+        if tickers:
+            placeholders = ",".join("?" for _ in tickers)
+            clauses.append(
+                f"""
+                EXISTS (
+                    SELECT 1
+                    FROM article_company ac2
+                    JOIN companies c2 ON c2.id = ac2.company_id
+                    WHERE ac2.article_id = a.id
+                      AND ac2.match_type = 'ticker'
+                      AND UPPER(c2.ticker) IN ({placeholders})
+                )
+                """
+            )
+            params.extend([ticker.upper() for ticker in tickers])
         where_sql = " AND ".join(clauses)
         total = self.conn.execute(
             f"SELECT COUNT(*) FROM articles a WHERE {where_sql}",
@@ -436,9 +474,11 @@ class Repository:
                 a.canonical_url,
                 a.published_at,
                 a.source_domain,
+                a.sentiment_label,
+                a.topic_cluster_id,
                 GROUP_CONCAT(DISTINCT c.ticker) AS tickers
             FROM articles a
-            LEFT JOIN article_company ac ON ac.article_id = a.id AND ac.match_type = 'ticker'
+            LEFT JOIN article_company ac ON ac.article_id = a.id AND ac.match_type = 'ticker' AND ac.confidence >= 0.9
             LEFT JOIN companies c ON c.id = ac.company_id
             WHERE {where_sql}
             GROUP BY a.id
@@ -450,8 +490,8 @@ class Repository:
         articles = []
         for row in rows:
             tickers = [ticker for ticker in (row["tickers"] or "").split(",") if ticker]
-            if len(tickers) > 8:
-                tickers = []
+            if len(tickers) > 6:
+                tickers = tickers[:6]
             articles.append(
                 {
                     "id": row["id"],
@@ -460,6 +500,8 @@ class Repository:
                     "url": row["canonical_url"],
                     "publishedDate": row["published_at"],
                     "sourceDomain": row["source_domain"],
+                    "sentimentLabel": row["sentiment_label"],
+                    "topicCluster": row["topic_cluster_id"],
                     "tickers": tickers,
                 }
             )

@@ -11,9 +11,11 @@ from app.workers.runner import WorkerRunner
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
 except ImportError:  # pragma: no cover
     BackgroundScheduler = None
     CronTrigger = None
+    IntervalTrigger = None
 
 
 DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "AMD", "GOOGL", "AMZN", "META", "TSLA"]
@@ -26,8 +28,16 @@ def enqueue_scheduled_jobs(repo, tickers: list[str]) -> None:
     repo.enqueue_job("refresh_insiders", {"tickers": tickers}, priority=40)
     repo.enqueue_job(
         "ingest_default_feeds",
-        {"extract_articles": False, "max_articles_per_feed": 25},
+        {"extract_articles": False, "max_articles_per_feed": 25, "force_refresh": True},
         priority=50,
+    )
+
+
+def enqueue_feed_poll(repo) -> None:
+    repo.enqueue_job(
+        "ingest_default_feeds",
+        {"extract_articles": False, "max_articles_per_feed": 25, "force_refresh": True},
+        priority=5,
     )
 
 
@@ -63,6 +73,14 @@ def main() -> None:
             id="nightly_etl",
             replace_existing=True,
         )
+        if IntervalTrigger is not None:
+            scheduler.add_job(
+                lambda: enqueue_feed_poll(ctx.repo),
+                IntervalTrigger(minutes=45),
+                id="rss_poll",
+                replace_existing=True,
+            )
+            logging.info("Scheduler registered RSS poll every 45 minutes")
         scheduler.start()
         logging.info("Scheduler registered nightly ETL at 02:00")
 

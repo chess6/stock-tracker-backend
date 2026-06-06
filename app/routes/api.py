@@ -94,14 +94,23 @@ def news_feed():
     q = request.args.get("q", "").strip() or None
     category = request.args.get("category", "").strip() or None
     source_domain = request.args.get("sourceDomain", "").strip() or None
+    tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
     payload = get_repo().list_unique_articles(
         limit=limit,
         offset=offset,
         q=q,
         category=category,
         source_domain=source_domain,
+        tickers=tickers or None,
     )
     return jsonify(payload)
+
+
+@api_bp.route("/macro/snapshot", methods=["GET"])
+def macro_snapshot():
+    from ..services.macro import MacroSnapshotService
+
+    return jsonify(MacroSnapshotService().snapshot())
 
 
 @api_bp.route("/ticker/<ticker>/news", methods=["GET"])
@@ -275,10 +284,36 @@ def ingest_default_feeds():
 
 @api_bp.route("/admin/dedup-articles", methods=["POST"])
 def dedup_articles():
+    from ..services.article_enrichment import infer_topic_cluster, simple_sentiment
+
     repo = get_repo()
     dates_normalized = repo.normalize_published_dates()
     deduplication = repo.deduplicate_articles()
-    return jsonify({"datesNormalized": dates_normalized, "deduplication": deduplication})
+    enriched = 0
+    rows = repo.conn.execute(
+        """
+        SELECT id, title, summary
+        FROM articles
+        WHERE sentiment_label IS NULL
+        ORDER BY id DESC
+        LIMIT 500
+        """
+    ).fetchall()
+    for row in rows:
+        text = " ".join(filter(None, [row["title"], row["summary"]]))
+        label, score = simple_sentiment(text)
+        topic = infer_topic_cluster(text)
+        repo.conn.execute(
+            "UPDATE articles SET sentiment_label = ?, sentiment_score = ?, topic_cluster_id = ? WHERE id = ?",
+            (label, score, topic, row["id"]),
+        )
+        enriched += 1
+    repo.conn.commit()
+    return jsonify({
+        "datesNormalized": dates_normalized,
+        "deduplication": deduplication,
+        "sentimentEnriched": enriched,
+    })
 
 
 @api_bp.route("/admin/bootstrap", methods=["POST"])

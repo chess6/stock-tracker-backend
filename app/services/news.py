@@ -11,6 +11,8 @@ import requests
 
 from ..repositories import Repository, utc_now_iso
 from .article_dedup import canonicalize_url, normalize_published_at
+from .article_enrichment import infer_topic_cluster, simple_sentiment, simhash_fingerprint
+from .ticker_matcher import match_tickers_in_text
 
 try:
     import feedparser  # type: ignore
@@ -135,19 +137,7 @@ class NewsService:
         return body
 
     def _match_companies(self, text: str) -> list[tuple[int, str, float]]:
-        matches = []
-        uppercase_text = f" {text.upper()} "
-        for company in self.repo.list_companies_for_matching():
-            ticker = company["ticker"].upper()
-            if len(ticker) < 3:
-                continue
-            if re.search(rf"(?<![A-Z]){re.escape(ticker)}(?![A-Z])", uppercase_text):
-                matches.append((company["id"], "ticker", 0.95))
-                continue
-            name = (company["name"] or "").upper()
-            if name and name in uppercase_text:
-                matches.append((company["id"], "company_name", 0.75))
-        return matches
+        return match_tickers_in_text(text, self.repo.list_companies_for_matching())
 
     def ingest_feed(
         self,
@@ -182,19 +172,32 @@ class NewsService:
                     body_text = extract_article_text(html)
                 except requests.RequestException:
                     pass
+            summary_text = strip_html(entry.get("summary") or "")
+            enrichment_text = " ".join(filter(None, [entry.get("title"), summary_text, body_text]))
+            sentiment_label, sentiment_score = simple_sentiment(enrichment_text)
+            topic_cluster_id = infer_topic_cluster(enrichment_text)
             article_id = self.repo.upsert_article(
                 {
                     "canonical_url": article_url,
                     "url_hash": url_hash(article_url),
                     "title": entry["title"],
-                    "summary": strip_html(entry.get("summary") or ""),
+                    "summary": summary_text,
                     "body_text": body_text,
                     "source_domain": urlparse(article_url).netloc,
                     "published_at": normalize_published_at(entry.get("published")),
                     "fetched_at": utc_now_iso(),
                     "content_hash": text_hash(body_text or entry["title"]),
+                    "sentiment_label": sentiment_label,
+                    "sentiment_score": sentiment_score,
+                    "topic_cluster_id": topic_cluster_id,
                     "raw_source": f"feed:{feed_id}",
                 }
+            )
+            self.repo.upsert_embedding_metadata(
+                article_id,
+                model="simhash",
+                content_hash=simhash_fingerprint(enrichment_text),
+                storage_key=simhash_fingerprint(enrichment_text),
             )
             match_text = " ".join(filter(None, [entry.get("title"), entry.get("summary"), body_text]))
             for company_id, match_type, confidence in self._match_companies(match_text):
