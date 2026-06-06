@@ -87,6 +87,23 @@ def ticker_intraday(ticker: str):
     return jsonify({"intraday": [], "tickerMeta": company})
 
 
+@api_bp.route("/news", methods=["GET"])
+def news_feed():
+    limit = min(max(int(request.args.get("limit", 50)), 1), 200)
+    offset = max(int(request.args.get("offset", 0)), 0)
+    q = request.args.get("q", "").strip() or None
+    category = request.args.get("category", "").strip() or None
+    source_domain = request.args.get("sourceDomain", "").strip() or None
+    payload = get_repo().list_unique_articles(
+        limit=limit,
+        offset=offset,
+        q=q,
+        category=category,
+        source_domain=source_domain,
+    )
+    return jsonify(payload)
+
+
 @api_bp.route("/ticker/<ticker>/news", methods=["GET"])
 def ticker_news(ticker: str):
     return jsonify(get_repo().get_company_news(ticker))
@@ -173,6 +190,22 @@ def insiders_buying_sums():
                 source = "nasdaq"
             except Exception:
                 rows = []
+    if tickers:
+        by_ticker = {row["ticker"]: row for row in rows if row.get("ticker")}
+        rows = [
+            by_ticker.get(
+                ticker,
+                {
+                    "ticker": ticker,
+                    "company": None,
+                    "buy6m": 0.0,
+                    "buy3m": 0.0,
+                    "buy1m": 0.0,
+                    "owners6m": 0,
+                },
+            )
+            for ticker in tickers
+        ]
     return jsonify({"rows": rows, "meta": {"source": source}})
 
 

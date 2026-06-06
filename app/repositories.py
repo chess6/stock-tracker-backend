@@ -312,6 +312,78 @@ class Repository:
         )
         self.conn.commit()
 
+    def list_unique_articles(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        q: str | None = None,
+        category: str | None = None,
+        source_domain: str | None = None,
+    ) -> dict:
+        clauses = ["a.duplicate_of_article_id IS NULL"]
+        params: list = []
+        if q:
+            clauses.append("(LOWER(a.title) LIKE ? OR LOWER(COALESCE(a.summary, '')) LIKE ?)")
+            needle = f"%{q.lower().strip()}%"
+            params.extend([needle, needle])
+        if source_domain:
+            clauses.append("LOWER(a.source_domain) LIKE ?")
+            params.append(f"%{source_domain.lower().strip()}%")
+        if category:
+            clauses.append(
+                """
+                EXISTS (
+                    SELECT 1 FROM feeds f
+                    WHERE a.raw_source = 'feed:' || f.id AND LOWER(f.category) = ?
+                )
+                """
+            )
+            params.append(category.lower().strip())
+        where_sql = " AND ".join(clauses)
+        total = self.conn.execute(
+            f"SELECT COUNT(*) FROM articles a WHERE {where_sql}",
+            params,
+        ).fetchone()[0]
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                a.id,
+                a.title,
+                a.summary,
+                a.body_text,
+                a.canonical_url,
+                a.published_at,
+                a.source_domain,
+                GROUP_CONCAT(DISTINCT c.ticker) AS tickers
+            FROM articles a
+            LEFT JOIN article_company ac ON ac.article_id = a.id AND ac.match_type = 'ticker'
+            LEFT JOIN companies c ON c.id = ac.company_id
+            WHERE {where_sql}
+            GROUP BY a.id
+            ORDER BY a.published_at DESC, a.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+        articles = []
+        for row in rows:
+            tickers = [ticker for ticker in (row["tickers"] or "").split(",") if ticker]
+            if len(tickers) > 8:
+                tickers = []
+            articles.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "description": row["summary"] or row["body_text"],
+                    "url": row["canonical_url"],
+                    "publishedDate": row["published_at"],
+                    "sourceDomain": row["source_domain"],
+                    "tickers": tickers,
+                }
+            )
+        return {"articles": articles, "total": total, "limit": limit, "offset": offset}
+
     def get_company_news(self, ticker: str, limit: int = 25) -> list[dict]:
         rows = self.conn.execute(
             """
@@ -513,7 +585,7 @@ class Repository:
             FROM insider_transactions i
             JOIN companies c ON c.id = i.company_id
             WHERE i.transaction_code IN ('P', 'S')
-              AND COALESCE(i.transaction_value, 0) >= 100000
+              AND COALESCE(i.transaction_value, 0) >= 10000
               AND (i.security_title IS NULL OR i.security_title NOT LIKE '%Preferred%')
               {ticker_filter}
             GROUP BY c.ticker, c.name

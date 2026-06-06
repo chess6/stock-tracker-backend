@@ -138,6 +138,8 @@ class NewsService:
         uppercase_text = f" {text.upper()} "
         for company in self.repo.list_companies_for_matching():
             ticker = company["ticker"].upper()
+            if len(ticker) < 3:
+                continue
             if re.search(rf"(?<![A-Z]){re.escape(ticker)}(?![A-Z])", uppercase_text):
                 matches.append((company["id"], "ticker", 0.95))
                 continue

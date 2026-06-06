@@ -9,7 +9,7 @@ from ..repositories import Repository
 
 
 class InsidersService:
-    def __init__(self, repo: Repository, sec_client: SecClient, max_filings_per_company: int = 8) -> None:
+    def __init__(self, repo: Repository, sec_client: SecClient, max_filings_per_company: int = 40) -> None:
         self.repo = repo
         self.sec_client = sec_client
         self.max_filings_per_company = max_filings_per_company

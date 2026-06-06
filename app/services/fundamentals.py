@@ -172,12 +172,22 @@ def build_company_metrics(row: dict, price: float | None = None) -> dict:
     ncfo = row.get("ncfo")
     capex = row.get("capex")
     fcf = row.get("fcf")
-    if fcf is None and ncfo is not None and capex is not None:
-        fcf = ncfo - capex
+    netinc = row.get("netinc")
+    if fcf is None and ncfo is not None:
+        if capex is not None:
+            fcf = ncfo - capex
+        else:
+            # Banks and other filers often omit capex in XBRL; use operating CF as FCF proxy.
+            fcf = ncfo
     eps = row.get("eps")
+    taxexp = row.get("taxexp")
+    interestexp = row.get("interestexp")
     ebitda = row.get("ebitda")
     if ebitda is None:
         ebitda = row.get("opinc") or row.get("ebit")
+    if ebitda is None and netinc is not None:
+        pretax_proxy = netinc + abs(taxexp or 0)
+        ebitda = pretax_proxy + abs(interestexp or 0)
     debt = row.get("debt")
     if debt is None:
         debt_current = row.get("debtcurrent")

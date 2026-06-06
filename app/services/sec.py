@@ -67,6 +67,16 @@ SEC_METRIC_CONFIG = {
         "concepts": ["IncomeTaxExpenseBenefit"],
         "units": ("USD",),
     },
+    "interestexp": {
+        "taxonomy": "us-gaap",
+        "concepts": [
+            "InterestExpense",
+            "InterestExpenseDebt",
+            "InterestExpenseOperating",
+            "InterestIncomeExpenseNet",
+        ],
+        "units": ("USD",),
+    },
     "eps": {
         "taxonomy": "us-gaap",
         "concepts": [

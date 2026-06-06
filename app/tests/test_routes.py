@@ -79,3 +79,46 @@ def test_search_and_financial_routes_use_sqlite_cache(app, client):
     payload = financial_response.get_json()
     assert payload["metrics"]["AAPL"]["marketCap"] == 50.0
     assert payload["raw"]["datatable"]["data"][0][0] == "AAPL"
+
+
+def test_news_feed_returns_unique_articles(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "AAPL", "name": "Apple Inc", "cik": "0000320193"}])
+        company = repo.get_company_by_ticker("AAPL")
+        primary_id = repo.upsert_article(
+            {
+                "canonical_url": "https://example.com/story-1",
+                "url_hash": "hash-story-1",
+                "title": "Apple launches product",
+                "summary": "AAPL news summary",
+                "source_domain": "example.com",
+                "published_at": "2025-06-01T12:00:00Z",
+                "fetched_at": "2025-06-01T12:05:00Z",
+                "content_hash": "content-1",
+                "raw_source": "test",
+            }
+        )
+        repo.upsert_article(
+            {
+                "canonical_url": "https://example.com/story-1-dup",
+                "url_hash": "hash-story-1-dup",
+                "title": "Apple launches product duplicate",
+                "summary": "duplicate",
+                "source_domain": "example.com",
+                "published_at": "2025-06-01T11:00:00Z",
+                "fetched_at": "2025-06-01T11:05:00Z",
+                "content_hash": "content-2",
+                "duplicate_of_article_id": primary_id,
+                "raw_source": "test",
+            }
+        )
+        repo.link_article_company(primary_id, company["id"], "ticker", 0.95)
+
+    response = client.get("/api/news?limit=10")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 1
+    assert len(payload["articles"]) == 1
+    assert payload["articles"][0]["title"] == "Apple launches product"
+    assert payload["articles"][0]["tickers"] == ["AAPL"]
