@@ -64,6 +64,11 @@ def test_search_and_financial_routes_use_sqlite_cache(app, client):
                 },
             ]
         )
+        repo.upsert_prices(
+            "AAPL",
+            [{"date": "2025-01-20", "open": 5.0, "high": 5.0, "low": 5.0, "close": 5.0, "volume": 100}],
+            source="test",
+        )
 
     search_response = client.get("/api/search?q=AAPL")
     assert search_response.status_code == 200

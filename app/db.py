@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS companies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
-    cik TEXT UNIQUE,
+    cik TEXT,
     exchange TEXT,
     sector TEXT,
     industry TEXT,
@@ -139,7 +139,41 @@ CREATE TABLE IF NOT EXISTS job_runs (
     FOREIGN KEY (job_id) REFERENCES ingestion_jobs(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS prices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    date TEXT NOT NULL,
+    open REAL,
+    high REAL,
+    low REAL,
+    close REAL,
+    volume REAL,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (ticker, date, source)
+);
+
+CREATE TABLE IF NOT EXISTS insider_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    filing_date TEXT,
+    transaction_date TEXT,
+    owner_name TEXT,
+    transaction_code TEXT,
+    shares REAL,
+    price_per_share REAL,
+    transaction_value REAL,
+    security_title TEXT,
+    form TEXT,
+    accession TEXT,
+    source TEXT NOT NULL DEFAULT 'sec_edgar',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    UNIQUE (company_id, accession, owner_name, transaction_date, transaction_code, shares)
+);
+
 CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name);
+CREATE INDEX IF NOT EXISTS idx_companies_cik ON companies(cik);
 CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_source_domain_published_at ON articles(source_domain, published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_duplicate_of ON articles(duplicate_of_article_id);
@@ -148,6 +182,8 @@ CREATE INDEX IF NOT EXISTS idx_article_company_article_company ON article_compan
 CREATE INDEX IF NOT EXISTS idx_fundamentals_company_metric_period ON fundamentals(company_id, metric, period_end, period_type);
 CREATE INDEX IF NOT EXISTS idx_fundamentals_company_filing_date ON fundamentals(company_id, filing_date DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_status_available ON ingestion_jobs(status, available_at, priority);
+CREATE INDEX IF NOT EXISTS idx_prices_ticker_date ON prices(ticker, date DESC);
+CREATE INDEX IF NOT EXISTS idx_insider_company_filing ON insider_transactions(company_id, filing_date DESC);
 """
 
 
@@ -175,10 +211,54 @@ def get_db() -> sqlite3.Connection:
     return g.db
 
 
+def _companies_table_sql(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='companies'"
+    ).fetchone()
+    return row[0] if row else None
+
+
+def migrate_schema(conn: sqlite3.Connection) -> None:
+    companies_sql = _companies_table_sql(conn)
+    if companies_sql and "CIK TEXT UNIQUE" in companies_sql.upper().replace("\n", " "):
+        conn.executescript(
+            """
+            CREATE TABLE companies__new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                cik TEXT,
+                exchange TEXT,
+                sector TEXT,
+                industry TEXT,
+                sec_filings_url TEXT,
+                company_site TEXT,
+                source TEXT DEFAULT 'manual',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO companies__new (
+                id, ticker, name, cik, exchange, sector, industry,
+                sec_filings_url, company_site, source, created_at, updated_at
+            )
+            SELECT
+                id, ticker, name, cik, exchange, sector, industry,
+                sec_filings_url, company_site, source, created_at, updated_at
+            FROM companies;
+            DROP TABLE companies;
+            ALTER TABLE companies__new RENAME TO companies;
+            CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name);
+            CREATE INDEX IF NOT EXISTS idx_companies_cik ON companies(cik);
+            """
+        )
+        conn.commit()
+
+
 def init_db(path: str) -> None:
     conn = connect_db(path)
     try:
         conn.executescript(SCHEMA)
+        migrate_schema(conn)
         conn.commit()
     finally:
         conn.close()

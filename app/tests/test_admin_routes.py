@@ -9,6 +9,8 @@ def test_admin_status_and_default_feeds(app, client):
     payload = status_response.get_json()
     assert "counts" in payload
     assert "freshness" in payload
+    assert "jobs" in payload
+    assert "feeds" in payload
 
     feeds_response = client.get("/api/admin/default-feeds")
     assert feeds_response.status_code == 200

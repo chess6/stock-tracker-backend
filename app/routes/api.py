@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from flask import Blueprint, current_app, jsonify, request
 
+from ..clients.sec import SecClient
 from ..db import get_db
 from ..repositories import Repository
 from ..services.fundamentals import FundamentalsService
+from ..services.insiders import InsidersService
 from ..services.nasdaq import NasdaqService
 from ..services.news import NewsService
-from ..services.sec import SecClient
+from ..services.prices import PricesService
 
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
@@ -37,6 +39,14 @@ def get_news_service() -> NewsService:
     )
 
 
+def get_prices_service() -> PricesService:
+    return PricesService(get_repo())
+
+
+def get_insiders_service() -> InsidersService:
+    return InsidersService(get_repo(), get_sec_client())
+
+
 def get_nasdaq_service() -> NasdaqService:
     return NasdaqService(
         api_key=current_app.config.get("NASDAQ_API_KEY"),
@@ -57,15 +67,18 @@ def search_ticker():
 def ticker_summary(ticker: str):
     repo = get_repo()
     company = repo.get_company_by_ticker(ticker)
-    prices = []
-    nasdaq = get_nasdaq_service()
-    if nasdaq.is_enabled():
-        try:
-            prices = nasdaq.fetch_price_history(ticker.upper())
-        except Exception:
-            prices = []
+    prices = get_prices_service().get_price_history(ticker.upper())
+    source = "sqlite"
+    if not prices:
+        nasdaq = get_nasdaq_service()
+        if nasdaq.is_enabled():
+            try:
+                prices = nasdaq.fetch_price_history(ticker.upper())
+                source = "nasdaq"
+            except Exception:
+                prices = []
     meta = company or {"ticker": ticker.upper(), "name": ticker.upper()}
-    return jsonify({"prices": prices, "meta": meta})
+    return jsonify({"prices": prices, "meta": meta, "source": source})
 
 
 @api_bp.route("/ticker/<ticker>/intraday", methods=["GET"])
@@ -87,16 +100,19 @@ def tickers_top():
     repo = get_repo()
     quotes = {}
     companies = {ticker: repo.get_company_by_ticker(ticker) for ticker in tickers}
-    nasdaq = get_nasdaq_service()
-    nasdaq_quotes = {}
-    if nasdaq.is_enabled():
-        try:
-            nasdaq_quotes = nasdaq.fetch_top_quotes(tickers)
-        except Exception:
-            nasdaq_quotes = {}
+    price_quotes = get_prices_service().get_quotes(tickers)
+    source = "sqlite" if any(price_quotes.get(t, {}).get("last") is not None for t in tickers) else "disabled"
+    if source == "disabled":
+        nasdaq = get_nasdaq_service()
+        if nasdaq.is_enabled():
+            try:
+                price_quotes = nasdaq.fetch_top_quotes(tickers)
+                source = "nasdaq"
+            except Exception:
+                price_quotes = {}
     for ticker in tickers:
         company = companies.get(ticker) or {}
-        quote = nasdaq_quotes.get(ticker, {})
+        quote = price_quotes.get(ticker, {})
         quotes[ticker] = {
             "last": quote.get("last"),
             "tngoLast": quote.get("last"),
@@ -109,7 +125,7 @@ def tickers_top():
             "high": quote.get("high"),
             "low": quote.get("low"),
         }
-    return jsonify({"quotes": quotes})
+    return jsonify({"quotes": quotes, "meta": {"source": source}})
 
 
 @api_bp.route("/tickers/daily-change", methods=["GET"])
@@ -117,11 +133,19 @@ def tickers_daily_change():
     tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
     if not tickers:
         return jsonify({"changes": {}})
-    nasdaq = get_nasdaq_service()
-    if not nasdaq.is_enabled():
-        return jsonify({"changes": {ticker: {"prevClose": None, "todayClose": None} for ticker in tickers}, "meta": {"source": "disabled"}})
-    changes = nasdaq.fetch_daily_change(tickers)
-    return jsonify({"changes": changes, "meta": {"source": "nasdaq"}})
+    changes = get_prices_service().get_daily_changes(tickers)
+    source = "sqlite"
+    if not any(item.get("todayClose") is not None for item in changes.values()):
+        nasdaq = get_nasdaq_service()
+        if nasdaq.is_enabled():
+            try:
+                changes = nasdaq.fetch_daily_change(tickers)
+                source = "nasdaq"
+            except Exception:
+                pass
+    if source == "sqlite" and not any(item.get("todayClose") is not None for item in changes.values()):
+        source = "disabled"
+    return jsonify({"changes": changes, "meta": {"source": source}})
 
 
 @api_bp.route("/ticker/financials", methods=["GET"])
@@ -139,19 +163,31 @@ def tickers_financials():
 @api_bp.route("/insiders/buying-sums", methods=["GET"])
 def insiders_buying_sums():
     tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
-    nasdaq = get_nasdaq_service()
-    if not nasdaq.is_enabled():
-        return jsonify({"rows": [], "meta": {"source": "disabled"}})
-    rows = nasdaq.fetch_insider_buying(tickers or None)
-    return jsonify({"rows": rows, "meta": {"source": "nasdaq"}})
+    rows = get_insiders_service().buying_sums(tickers or None)
+    source = "sec_edgar" if rows else "disabled"
+    if not rows:
+        nasdaq = get_nasdaq_service()
+        if nasdaq.is_enabled():
+            try:
+                rows = nasdaq.fetch_insider_buying(tickers or None)
+                source = "nasdaq"
+            except Exception:
+                rows = []
+    return jsonify({"rows": rows, "meta": {"source": source}})
 
 
 @api_bp.route("/ticker/<ticker>/sf2", methods=["GET"])
 def ticker_sf2(ticker: str):
+    payload = get_insiders_service().sf2_payload(ticker)
+    if payload.get("datatable", {}).get("data"):
+        return jsonify(payload)
     nasdaq = get_nasdaq_service()
-    if not nasdaq.is_enabled():
-        return jsonify({"error": "NASDAQ_API_KEY is not configured"}), 503
-    return jsonify(nasdaq.fetch_sf2(ticker))
+    if nasdaq.is_enabled():
+        try:
+            return jsonify(nasdaq.fetch_sf2(ticker))
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 502
+    return jsonify({"error": "No insider data in cache. Run bootstrap or refresh insiders."}), 404
 
 
 @api_bp.route("/admin/status", methods=["GET"])
@@ -161,7 +197,11 @@ def admin_status():
 
 @api_bp.route("/admin/sync-companies", methods=["POST"])
 def sync_companies():
-    payload = get_fundamentals_service().refresh_company_tickers(current_app.config["SEC_COMPANY_TICKERS_URL"])
+    try:
+        payload = get_fundamentals_service().refresh_company_tickers(current_app.config["SEC_COMPANY_TICKERS_URL"])
+    except Exception as exc:
+        current_app.logger.exception("Company sync failed")
+        return jsonify({"error": str(exc)}), 500
     return jsonify(payload)
 
 
@@ -210,15 +250,69 @@ def bootstrap():
 
     fundamentals_service = get_fundamentals_service()
     news_service = get_news_service()
+    prices_service = get_prices_service()
+    insiders_service = get_insiders_service()
 
-    companies = fundamentals_service.refresh_company_tickers(current_app.config["SEC_COMPANY_TICKERS_URL"])
-    fundamentals = fundamentals_service.refresh_fundamentals(tickers)
-    feeds = news_service.ingest_default_feeds()
+    try:
+        companies = fundamentals_service.refresh_company_tickers(current_app.config["SEC_COMPANY_TICKERS_URL"])
+        fundamentals = fundamentals_service.refresh_fundamentals(tickers)
+        feeds = news_service.ingest_default_feeds(extract_articles=False, max_articles_per_feed=25)
+        prices = prices_service.refresh_prices(tickers)
+        insiders = insiders_service.refresh_insiders(tickers)
+    except Exception as exc:
+        current_app.logger.exception("Bootstrap failed")
+        return jsonify({"error": str(exc), "tickers": tickers}), 500
+
     return jsonify(
         {
             "companies": companies,
             "fundamentals": fundamentals,
             "feeds": feeds,
+            "prices": prices,
+            "insiders": insiders,
             "tickers": tickers,
         }
     )
+
+
+@api_bp.route("/admin/refresh-prices", methods=["POST"])
+def refresh_prices():
+    tickers = request.json.get("tickers") if request.is_json else None
+    if not tickers:
+        tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    if not tickers:
+        return jsonify({"error": "No tickers provided"}), 400
+    try:
+        payload = get_prices_service().refresh_prices(tickers)
+    except Exception as exc:
+        current_app.logger.exception("Price refresh failed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(payload)
+
+
+@api_bp.route("/admin/refresh-insiders", methods=["POST"])
+def refresh_insiders():
+    tickers = request.json.get("tickers") if request.is_json else None
+    if not tickers:
+        tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    if not tickers:
+        return jsonify({"error": "No tickers provided"}), 400
+    try:
+        payload = get_insiders_service().refresh_insiders(tickers)
+    except Exception as exc:
+        current_app.logger.exception("Insider refresh failed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(payload)
+
+
+@api_bp.route("/admin/enqueue-job", methods=["POST"])
+def enqueue_job():
+    body = request.get_json(silent=True) or {}
+    job_type = body.get("job_type") or request.args.get("job_type")
+    if not job_type:
+        return jsonify({"error": "job_type is required"}), 400
+    payload = body.get("payload") or {}
+    if not payload and request.args.get("tickers"):
+        payload["tickers"] = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    job_id = get_repo().enqueue_job(job_type, payload)
+    return jsonify({"jobId": job_id, "jobType": job_type, "payload": payload})

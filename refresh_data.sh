@@ -10,6 +10,10 @@ TICKERS="${*:-AAPL,MSFT,NVDA,AMD,GOOGL,AMZN,META,TSLA}"
 
 curl -sS -X POST "$BASE_URL/api/admin/refresh-fundamentals?tickers=$TICKERS"
 echo
+curl -sS -X POST "$BASE_URL/api/admin/refresh-prices?tickers=$TICKERS"
+echo
+curl -sS -X POST "$BASE_URL/api/admin/refresh-insiders?tickers=$TICKERS"
+echo
 curl -sS -X POST "$BASE_URL/api/admin/ingest-default-feeds"
 echo
 echo "Refresh complete"

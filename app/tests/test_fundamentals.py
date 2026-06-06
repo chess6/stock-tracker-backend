@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.services.fundamentals import pivot_fundamentals_rows
 from app.services.sec import normalize_company_facts
 
 
@@ -49,3 +50,198 @@ def test_normalize_company_facts_maps_core_metrics():
     assert ("sharesbas", "2024-12-31", "ARY") in metrics
     assert ("fcf", "2024-12-31", "ARY") in metrics
     assert metrics[("fcf", "2024-12-31", "ARY")]["value"] == 150.0
+
+
+def test_normalize_company_facts_derives_gp_and_ebitda():
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            {"val": 1000, "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2025-01-20", "end": "2024-12-31", "accn": "1"},
+                        ]
+                    }
+                },
+                "CostOfRevenue": {
+                    "units": {
+                        "USD": [
+                            {"val": 400, "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2025-01-20", "end": "2024-12-31", "accn": "1"},
+                        ]
+                    }
+                },
+                "OperatingIncomeLoss": {
+                    "units": {
+                        "USD": [
+                            {"val": 300, "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2025-01-20", "end": "2024-12-31", "accn": "1"},
+                        ]
+                    }
+                },
+                "DepreciationDepletionAndAmortization": {
+                    "units": {
+                        "USD": [
+                            {"val": 50, "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2025-01-20", "end": "2024-12-31", "accn": "1"},
+                        ]
+                    }
+                },
+            }
+        }
+    }
+
+    rows = normalize_company_facts(9, payload)
+    metrics = {(row["metric"], row["period_end"]): row["value"] for row in rows}
+    assert metrics[("gp", "2024-12-31")] == 600.0
+    assert metrics[("ebit", "2024-12-31")] == 300.0
+    assert metrics[("ebitda", "2024-12-31")] == 350.0
+
+
+def test_build_company_metrics_computes_ebitda_ev():
+    from app.services.fundamentals import build_company_metrics
+
+    metrics = build_company_metrics(
+        {
+            "sharesbas": 10.0,
+            "revenue": 1000.0,
+            "equity": 500.0,
+            "ncfo": 200.0,
+            "fcf": 150.0,
+            "eps": 5.0,
+            "ebitda": 120.0,
+            "debt": 80.0,
+            "cashneq": 20.0,
+        },
+        price=10.0,
+    )
+    assert metrics["marketCap"] == 100.0
+    assert metrics["ebitdaEv"] == 120.0 / (100.0 + 80.0 - 20.0)
+
+
+def test_get_financials_most_recent_prefers_annual_rows():
+    from app.services.fundamentals import FundamentalsService
+
+    class FakeRepo:
+        def fetch_fundamentals_rows(self, tickers, gte=None, dimension=None):
+            return [
+                {
+                    "ticker": "JPM",
+                    "company_name": "JPM",
+                    "metric": "netinc",
+                    "value": 1.0,
+                    "period_end": "2026-03-31",
+                    "period_type": "quarterly",
+                    "dimension": "ARQ",
+                    "fiscal_year": 2026,
+                    "fiscal_quarter": "Q1",
+                    "filing_date": "2026-05-01",
+                },
+                {
+                    "ticker": "JPM",
+                    "company_name": "JPM",
+                    "metric": "revenue",
+                    "value": 100.0,
+                    "period_end": "2025-12-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2025,
+                    "fiscal_quarter": "FY",
+                    "filing_date": "2026-02-01",
+                },
+                {
+                    "ticker": "JPM",
+                    "company_name": "JPM",
+                    "metric": "netinc",
+                    "value": 50.0,
+                    "period_end": "2025-12-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2025,
+                    "fiscal_quarter": "FY",
+                    "filing_date": "2026-02-01",
+                },
+            ]
+
+        def fetch_prices(self, ticker, limit=None):
+            return []
+
+    payload = FundamentalsService(FakeRepo(), None).get_financials_payload(["JPM"], None, None, True)
+    row = payload["raw"]["datatable"]["data"][0]
+    cols = [c["name"] for c in payload["raw"]["datatable"]["columns"]]
+    wide = dict(zip(cols, row))
+    assert wide["calendardate"] == "2025-12-31"
+    assert wide["dimension"] == "ARY"
+    assert wide["revenue"] == 100.0
+
+
+def test_pivot_fundamentals_rows_aligns_shares_to_statement_period():
+    rows = [
+        {
+            "ticker": "AAPL",
+            "company_name": "Apple Inc.",
+            "metric": "revenue",
+            "value": 416_000_000_000,
+            "period_end": "2025-09-27",
+            "period_type": "annual",
+            "dimension": "ARY",
+            "fiscal_year": 2025,
+            "fiscal_quarter": "FY",
+            "filing_date": "2025-10-31",
+        },
+        {
+            "ticker": "AAPL",
+            "company_name": "Apple Inc.",
+            "metric": "netinc",
+            "value": 112_000_000_000,
+            "period_end": "2025-09-27",
+            "period_type": "annual",
+            "dimension": "ARY",
+            "fiscal_year": 2025,
+            "fiscal_quarter": "FY",
+            "filing_date": "2025-10-31",
+        },
+        {
+            "ticker": "AAPL",
+            "company_name": "Apple Inc.",
+            "metric": "sharesbas",
+            "value": 14_776_353_000,
+            "period_end": "2025-10-17",
+            "period_type": "annual",
+            "dimension": "ARY",
+            "fiscal_year": 2025,
+            "fiscal_quarter": "FY",
+            "filing_date": "2025-10-31",
+        },
+        {
+            "ticker": "AAPL",
+            "company_name": "Apple Inc.",
+            "metric": "revenue",
+            "value": 391_000_000_000,
+            "period_end": "2024-09-28",
+            "period_type": "annual",
+            "dimension": "ARY",
+            "fiscal_year": 2024,
+            "fiscal_quarter": "FY",
+            "filing_date": "2024-11-01",
+        },
+        {
+            "ticker": "AAPL",
+            "company_name": "Apple Inc.",
+            "metric": "revenue",
+            "value": 391_000_000_000,
+            "period_end": "2024-09-28",
+            "period_type": "annual",
+            "dimension": "ARY",
+            "fiscal_year": 2025,
+            "fiscal_quarter": "FY",
+            "filing_date": "2025-10-31",
+        },
+    ]
+
+    wide_rows = pivot_fundamentals_rows(rows)
+    by_date = {row["calendardate"]: row for row in wide_rows}
+
+    assert len(by_date) == 2
+    latest = by_date["2025-09-27"]
+    assert latest["revenue"] == 416_000_000_000
+    assert latest["netinc"] == 112_000_000_000
+    assert latest["sharesbas"] == 14_776_353_000
+    assert "2025-10-17" not in by_date

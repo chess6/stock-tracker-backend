@@ -1,0 +1,37 @@
+---
+description: Flask backend patterns, layering, and free-first API rules
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Backend Python
+
+## Layering
+
+- `app/routes/api.py` — thin handlers, `jsonify()`, no vendor HTTP
+- `app/services/` — business logic
+- `app/clients/` — HTTP clients (SEC, Stooq); no Flask imports
+- `app/repositories.py` — SQL only; upserts with `ON CONFLICT`
+- `app/workers/` — job handlers; drain `ingestion_jobs`
+
+## Required patterns
+
+```python
+# SEC: Host header must match URL host (www.sec.gov vs data.sec.gov)
+response = session.get(url, headers=client.headers_for(url))
+
+# Admin errors: JSON body, not bare 500
+return jsonify({"error": str(exc)}), 500
+```
+
+## Data rules
+
+- Multiple tickers can share one CIK — `companies.cik` is not unique.
+- Request-time routes read SQLite first; Nasdaq only as optional fallback.
+- Long ETL (feeds, SEC bulk) belongs in worker jobs or bootstrap, not blocking reads.
+
+## Tests
+
+- Fixtures: `app`, `client` from `app/tests/conftest.py`
+- Mock HTTP; no live SEC/Stooq in unit tests
+- Run: `python -m pytest app/tests/ -q`

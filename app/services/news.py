@@ -27,9 +27,10 @@ def build_google_news_rss_url(query: str) -> str:
 
 
 DEFAULT_FEEDS = [
-    {"name": "Reuters Business", "feed_url": "https://feeds.reuters.com/reuters/businessNews", "category": "finance"},
+    {"name": "BBC Business", "feed_url": "https://feeds.bbci.co.uk/news/business/rss.xml", "category": "finance"},
+    {"name": "NPR Business", "feed_url": "https://feeds.npr.org/1007/rss.xml", "category": "finance"},
     {"name": "CNBC Top News", "feed_url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114", "category": "finance"},
-    {"name": "MarketWatch Top Stories", "feed_url": "http://feeds.marketwatch.com/marketwatch/topstories/", "category": "finance"},
+    {"name": "MarketWatch Top Stories", "feed_url": "https://feeds.marketwatch.com/marketwatch/topstories/", "category": "finance"},
     {"name": "Techmeme", "feed_url": "https://www.techmeme.com/feed.xml", "category": "tech"},
     {"name": "Hacker News Front Page", "feed_url": "https://hnrss.org/frontpage", "category": "tech"},
     {"name": "Lobsters", "feed_url": "https://lobste.rs/rss", "category": "tech"},
@@ -145,9 +146,19 @@ class NewsService:
                 matches.append((company["id"], "company_name", 0.75))
         return matches
 
-    def ingest_feed(self, feed_url: str, name: str, category: str = "general") -> dict:
+    def ingest_feed(
+        self,
+        feed_url: str,
+        name: str,
+        category: str = "general",
+        *,
+        extract_articles: bool = True,
+        max_articles: int | None = None,
+    ) -> dict:
         feed_body = self._fetch_cached_text(feed_url, "feed")
         entries = parse_feed(feed_body)
+        if max_articles is not None:
+            entries = entries[:max_articles]
         feed_id = self.repo.upsert_feed(
             {
                 "name": name,
@@ -160,13 +171,13 @@ class NewsService:
         article_count = 0
         for entry in entries:
             article_url = entry["link"]
-            html = ""
-            body_text = ""
-            try:
-                html = self._fetch_cached_text(article_url, "article")
-                body_text = extract_article_text(html)
-            except requests.RequestException:
-                body_text = strip_html(entry.get("summary") or "")
+            body_text = strip_html(entry.get("summary") or "")
+            if extract_articles:
+                try:
+                    html = self._fetch_cached_text(article_url, "article")
+                    body_text = extract_article_text(html)
+                except requests.RequestException:
+                    pass
             article_id = self.repo.upsert_article(
                 {
                     "canonical_url": article_url,
@@ -190,22 +201,42 @@ class NewsService:
     def default_feeds(self) -> list[dict]:
         return list(DEFAULT_FEEDS)
 
-    def ingest_default_feeds(self) -> dict:
+    def ingest_default_feeds(
+        self,
+        *,
+        extract_articles: bool = True,
+        max_articles_per_feed: int | None = None,
+    ) -> dict:
         results = []
         total_articles = 0
+        failed_feeds = 0
         for feed in self.default_feeds():
-            result = self.ingest_feed(feed["feed_url"], feed["name"], feed["category"])
-            total_articles += result["articlesProcessed"]
-            results.append(
-                {
-                    "name": feed["name"],
-                    "category": feed["category"],
-                    "feed_url": feed["feed_url"],
-                    "articlesProcessed": result["articlesProcessed"],
-                }
-            )
+            feed_result = {
+                "name": feed["name"],
+                "category": feed["category"],
+                "feed_url": feed["feed_url"],
+                "articlesProcessed": 0,
+                "status": "ok",
+            }
+            try:
+                result = self.ingest_feed(
+                    feed["feed_url"],
+                    feed["name"],
+                    feed["category"],
+                    extract_articles=extract_articles,
+                    max_articles=max_articles_per_feed,
+                )
+                feed_result["articlesProcessed"] = result["articlesProcessed"]
+                feed_result["feedId"] = result["feedId"]
+                total_articles += result["articlesProcessed"]
+            except requests.RequestException as exc:
+                feed_result["status"] = "error"
+                feed_result["error"] = str(exc)
+                failed_feeds += 1
+            results.append(feed_result)
         return {
             "feedsProcessed": len(results),
             "articlesProcessed": total_articles,
+            "failedFeeds": failed_feeds,
             "results": results,
         }

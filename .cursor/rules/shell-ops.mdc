@@ -1,0 +1,24 @@
+---
+description: Backend shell scripts and process management
+globs: "*.sh"
+alwaysApply: false
+---
+
+# Backend Shell Scripts
+
+Required header on every script:
+
+```bash
+#!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+set -euo pipefail
+```
+
+| Script | Purpose |
+|--------|---------|
+| `start.sh` / `stop.sh` | Flask API (`FLASK_DEBUG=0`, port 5000) |
+| `worker.sh` / `stop_worker.sh` | Background ETL worker |
+| `bootstrap.sh` | POST `/api/admin/bootstrap` — exit 1 on HTTP 4xx/5xx |
+| `refresh_data.sh` | Fundamentals + prices + insiders + feeds |
+
+Logs: `backend.out`, `worker.out`. PID files: `.backend.pid`, `.worker.pid`.
