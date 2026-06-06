@@ -10,6 +10,7 @@ from xml.etree import ElementTree
 import requests
 
 from ..repositories import Repository, utc_now_iso
+from .article_dedup import canonicalize_url, normalize_published_at
 
 try:
     import feedparser  # type: ignore
@@ -70,7 +71,7 @@ def strip_html(html: str) -> str:
 
 
 def url_hash(url: str) -> str:
-    normalized = url.strip()
+    normalized = canonicalize_url(url) or url.strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
@@ -119,9 +120,9 @@ class NewsService:
         self.timeout = timeout
         self.cache_ttl_seconds = cache_ttl_seconds
 
-    def _fetch_cached_text(self, url: str, cache_namespace: str) -> str:
+    def _fetch_cached_text(self, url: str, cache_namespace: str, *, force_refresh: bool = False) -> str:
         cache_key = f"{cache_namespace}:{url}"
-        cached = self.repo.get_cached_http_response(cache_key)
+        cached = None if force_refresh else self.repo.get_cached_http_response(cache_key)
         if cached and cached.get("expires_at"):
             expires_at = datetime.fromisoformat(cached["expires_at"].replace("Z", "+00:00"))
             if expires_at > datetime.now(timezone.utc):
@@ -156,8 +157,9 @@ class NewsService:
         *,
         extract_articles: bool = True,
         max_articles: int | None = None,
+        force_refresh: bool = False,
     ) -> dict:
-        feed_body = self._fetch_cached_text(feed_url, "feed")
+        feed_body = self._fetch_cached_text(feed_url, "feed", force_refresh=force_refresh)
         entries = parse_feed(feed_body)
         if max_articles is not None:
             entries = entries[:max_articles]
@@ -172,11 +174,11 @@ class NewsService:
         )
         article_count = 0
         for entry in entries:
-            article_url = entry["link"]
+            article_url = canonicalize_url(entry["link"]) or entry["link"]
             body_text = strip_html(entry.get("summary") or "")
             if extract_articles:
                 try:
-                    html = self._fetch_cached_text(article_url, "article")
+                    html = self._fetch_cached_text(article_url, "article", force_refresh=force_refresh)
                     body_text = extract_article_text(html)
                 except requests.RequestException:
                     pass
@@ -188,7 +190,7 @@ class NewsService:
                     "summary": strip_html(entry.get("summary") or ""),
                     "body_text": body_text,
                     "source_domain": urlparse(article_url).netloc,
-                    "published_at": entry.get("published"),
+                    "published_at": normalize_published_at(entry.get("published")),
                     "fetched_at": utc_now_iso(),
                     "content_hash": text_hash(body_text or entry["title"]),
                     "raw_source": f"feed:{feed_id}",
@@ -208,6 +210,7 @@ class NewsService:
         *,
         extract_articles: bool = True,
         max_articles_per_feed: int | None = None,
+        force_refresh: bool = False,
     ) -> dict:
         results = []
         total_articles = 0
@@ -227,6 +230,7 @@ class NewsService:
                     feed["category"],
                     extract_articles=extract_articles,
                     max_articles=max_articles_per_feed,
+                    force_refresh=force_refresh,
                 )
                 feed_result["articlesProcessed"] = result["articlesProcessed"]
                 feed_result["feedId"] = result["feedId"]
@@ -236,9 +240,13 @@ class NewsService:
                 feed_result["error"] = str(exc)
                 failed_feeds += 1
             results.append(feed_result)
+        dates_normalized = self.repo.normalize_published_dates()
+        deduped = self.repo.deduplicate_articles()
         return {
             "feedsProcessed": len(results),
             "articlesProcessed": total_articles,
             "failedFeeds": failed_feeds,
+            "datesNormalized": dates_normalized,
+            "deduplication": deduped,
             "results": results,
         }

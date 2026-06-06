@@ -268,8 +268,17 @@ def default_feeds():
 
 @api_bp.route("/admin/ingest-default-feeds", methods=["POST"])
 def ingest_default_feeds():
-    payload = get_news_service().ingest_default_feeds()
+    force_refresh = str(request.args.get("forceRefresh", "true")).lower() in {"true", "1", "yes"}
+    payload = get_news_service().ingest_default_feeds(force_refresh=force_refresh)
     return jsonify(payload)
+
+
+@api_bp.route("/admin/dedup-articles", methods=["POST"])
+def dedup_articles():
+    repo = get_repo()
+    dates_normalized = repo.normalize_published_dates()
+    deduplication = repo.deduplicate_articles()
+    return jsonify({"datesNormalized": dates_normalized, "deduplication": deduplication})
 
 
 @api_bp.route("/admin/bootstrap", methods=["POST"])

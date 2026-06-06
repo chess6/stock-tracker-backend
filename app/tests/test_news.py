@@ -61,6 +61,40 @@ def test_news_ingestion_dedupes_by_url_and_links_ticker(app):
         assert news[0]["title"] == "AAPL launches new device"
 
 
+def test_semantic_dedup_marks_near_duplicate_titles(app):
+    with app.app_context():
+        repo = Repository(get_db())
+        primary_id = repo.upsert_article(
+            {
+                "canonical_url": "https://example.com/original",
+                "url_hash": "hash-original",
+                "title": "Apple launches new device in California",
+                "summary": "Apple Inc announced a launch event.",
+                "published_at": "2026-06-05T12:00:00Z",
+                "fetched_at": "2026-06-05T12:05:00Z",
+                "content_hash": "content-original",
+                "raw_source": "test",
+            }
+        )
+        duplicate_id = repo.upsert_article(
+            {
+                "canonical_url": "https://publisher.example/apple-launch",
+                "url_hash": "hash-duplicate",
+                "title": "Apple launches new device in Calif.",
+                "summary": "Apple announced a launch event today.",
+                "published_at": "2026-06-05T13:00:00Z",
+                "fetched_at": "2026-06-05T13:05:00Z",
+                "content_hash": "content-duplicate",
+                "raw_source": "test",
+            }
+        )
+        row = repo.conn.execute(
+            "SELECT duplicate_of_article_id FROM articles WHERE id = ?",
+            (duplicate_id,),
+        ).fetchone()
+        assert row["duplicate_of_article_id"] == primary_id
+
+
 def test_ingest_default_feeds_continues_after_feed_failure(app, monkeypatch):
     with app.app_context():
         repo = Repository(get_db())

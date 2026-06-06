@@ -251,10 +251,91 @@ class Repository:
                 return row["id"]
         return None
 
+    def find_duplicate_article(
+        self,
+        title: str,
+        summary: str | None = None,
+        *,
+        threshold: int = 88,
+        lookback: int = 500,
+    ) -> int | None:
+        from .services.article_dedup import find_semantic_duplicate
+
+        rows = self.conn.execute(
+            """
+            SELECT id, title, summary
+            FROM articles
+            WHERE duplicate_of_article_id IS NULL
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (lookback,),
+        ).fetchall()
+        return find_semantic_duplicate(
+            title,
+            summary,
+            [dict(row) for row in rows],
+            threshold=threshold,
+        )
+
+    def normalize_published_dates(self) -> int:
+        from .services.article_dedup import normalize_published_at
+
+        rows = self.conn.execute(
+            "SELECT id, published_at FROM articles WHERE published_at IS NOT NULL",
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            normalized = normalize_published_at(row["published_at"])
+            if normalized and normalized != row["published_at"]:
+                self.conn.execute(
+                    "UPDATE articles SET published_at = ? WHERE id = ?",
+                    (normalized, row["id"]),
+                )
+                updated += 1
+        self.conn.commit()
+        return updated
+
+    def deduplicate_articles(self, lookback: int = 2000) -> dict:
+        from .services.article_dedup import find_semantic_duplicate
+
+        rows = self.conn.execute(
+            """
+            SELECT id, title, summary
+            FROM articles
+            WHERE duplicate_of_article_id IS NULL
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (lookback,),
+        ).fetchall()
+        canonical: list[dict] = []
+        marked = 0
+        for row in rows:
+            article = dict(row)
+            duplicate_id = find_semantic_duplicate(
+                article["title"],
+                article.get("summary"),
+                canonical,
+            )
+            if duplicate_id is not None:
+                self.conn.execute(
+                    "UPDATE articles SET duplicate_of_article_id = ? WHERE id = ?",
+                    (duplicate_id, article["id"]),
+                )
+                marked += 1
+            else:
+                canonical.append(article)
+        self.conn.commit()
+        return {"scanned": len(rows), "markedDuplicates": marked, "uniqueRemaining": len(canonical)}
+
     def upsert_article(self, article: dict) -> int:
         duplicate_id = article.get("duplicate_of_article_id")
         if duplicate_id is None:
-            duplicate_id = self.find_duplicate_title(article["title"])
+            duplicate_id = self.find_duplicate_article(
+                article["title"],
+                article.get("summary"),
+            )
         cursor = self.conn.execute(
             """
             INSERT INTO articles (
