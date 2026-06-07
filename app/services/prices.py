@@ -97,3 +97,66 @@ class PricesService:
             prev_close = latest_two[1]["close"] if len(latest_two) > 1 else None
             changes[ticker.upper()] = {"prevClose": prev_close, "todayClose": today_close}
         return changes
+
+    @staticmethod
+    def _pct_change(current: float | None, past: float | None) -> float | None:
+        if current is None or past is None or past == 0:
+            return None
+        return ((current - past) / abs(past)) * 100
+
+    def get_market_stats(self, tickers: list[str]) -> dict:
+        """Multi-horizon returns and 52-week range stats from cached prices."""
+        horizons = {
+            "change1w": 5,
+            "change4w": 20,
+            "change16w": 80,
+            "change6m": 126,
+        }
+        stats: dict[str, dict] = {}
+        for ticker in tickers:
+            symbol = ticker.upper()
+            rows = self.repo.fetch_prices(symbol, limit=260)
+            if not rows:
+                stats[symbol] = {}
+                continue
+            latest_close = rows[0].get("close")
+            entry: dict = {}
+            window = rows[:252]
+            highs = [row["high"] for row in window if row.get("high") is not None]
+            lows = [row["low"] for row in window if row.get("low") is not None]
+            if highs and lows and latest_close is not None:
+                high52 = max(highs)
+                low52 = min(lows)
+                entry["high52w"] = high52
+                entry["low52w"] = low52
+                entry["pctTo52wHi"] = self._pct_change(latest_close, high52)
+                entry["pctFrom52wLo"] = self._pct_change(latest_close, low52)
+            for key, offset in horizons.items():
+                if len(rows) > offset:
+                    past_close = rows[offset].get("close")
+                    entry[key] = self._pct_change(latest_close, past_close)
+            stats[symbol] = entry
+        return stats
+
+    def get_movers(self, window: str = "d", threshold: float = 10.0, limit: int = 50) -> list[dict]:
+        """Daily or weekly movers exceeding threshold % from cached prices."""
+        offset = 1 if window == "d" else 5
+        candidates = self.repo.fetch_tickers_with_recent_prices(limit=500)
+        movers: list[dict] = []
+        for ticker in candidates:
+            rows = self.repo.fetch_prices(ticker, limit=offset + 2)
+            if len(rows) <= offset:
+                continue
+            latest = rows[0].get("close")
+            past = rows[offset].get("close")
+            change = self._pct_change(latest, past)
+            if change is None or abs(change) < threshold:
+                continue
+            movers.append({
+                "ticker": ticker,
+                "price": latest,
+                "change": change,
+                "window": window,
+            })
+        movers.sort(key=lambda item: abs(item["change"]), reverse=True)
+        return movers[:limit]

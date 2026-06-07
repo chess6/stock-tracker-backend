@@ -146,12 +146,51 @@ def tickers_top():
             "askPrice": None,
             "timestamp": quote.get("timestamp"),
             "name": company.get("name") or ticker,
+            "sector": company.get("sector"),
+            "industry": company.get("industry"),
             "prevClose": quote.get("prevClose"),
             "open": quote.get("open"),
             "high": quote.get("high"),
             "low": quote.get("low"),
         }
     return jsonify({"quotes": quotes, "meta": {"source": source}})
+
+
+@api_bp.route("/tickers/market-stats", methods=["GET"])
+def tickers_market_stats():
+    tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    if not tickers:
+        return jsonify({"stats": {}})
+    stats = get_prices_service().get_market_stats(tickers)
+    return jsonify({"stats": stats, "meta": {"source": "sqlite"}})
+
+
+@api_bp.route("/tickers/movers", methods=["GET"])
+def tickers_movers():
+    window = request.args.get("window", "d").lower()
+    if window not in {"d", "w"}:
+        window = "d"
+    threshold = request.args.get("threshold", default=10.0, type=float)
+    limit = request.args.get("limit", default=50, type=int)
+    movers = get_prices_service().get_movers(window=window, threshold=threshold, limit=limit)
+    return jsonify({"movers": movers, "meta": {"window": window, "threshold": threshold, "source": "sqlite"}})
+
+
+@api_bp.route("/companies/industries", methods=["GET"])
+def companies_industries():
+    groups = get_repo().list_industry_groups()
+    return jsonify({"industries": groups})
+
+
+@api_bp.route("/companies/peers", methods=["GET"])
+def companies_peers():
+    industry = request.args.get("industry", "").strip()
+    if not industry:
+        return jsonify({"error": "industry query param required"}), 400
+    sector = request.args.get("sector", "").strip() or None
+    limit = request.args.get("limit", default=100, type=int)
+    peers = get_repo().fetch_industry_peers(industry, sector=sector, limit=limit)
+    return jsonify({"peers": peers, "industry": industry, "sector": sector})
 
 
 @api_bp.route("/tickers/daily-change", methods=["GET"])
@@ -189,7 +228,8 @@ def tickers_financials():
 @api_bp.route("/insiders/buying-sums", methods=["GET"])
 def insiders_buying_sums():
     tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
-    rows = get_insiders_service().buying_sums(tickers or None)
+    min_buy6m = request.args.get("min_buy6m", type=float)
+    rows = get_insiders_service().buying_sums(tickers or None, min_buy6m=min_buy6m)
     source = "sec_edgar" if rows else "disabled"
     if not rows:
         nasdaq = get_nasdaq_service()
@@ -218,11 +258,14 @@ def insiders_buying_sums():
     return jsonify({"rows": rows, "meta": {"source": source}})
 
 
+# legacy URL: /sf2 keeps SHARADAR-compatible datatable shape for existing clients.
+# Planned alias: /ticker/<ticker>/insiders (same handler) once frontend fully migrates.
 @api_bp.route("/ticker/<ticker>/sf2", methods=["GET"])
 def ticker_sf2(ticker: str):
     payload = get_insiders_service().sf2_payload(ticker)
     if payload.get("datatable", {}).get("data"):
         return jsonify(payload)
+    # legacy: Nasdaq SHARADAR SF2 fallback — comment out when SQLite path is validated everywhere
     nasdaq = get_nasdaq_service()
     if nasdaq.is_enabled():
         try:

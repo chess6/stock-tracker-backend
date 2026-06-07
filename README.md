@@ -119,7 +119,7 @@ All admin routes are unauthenticated — intended for localhost dev only.
 | POST | `/api/admin/refresh-fundamentals?tickers=` | SEC XBRL CompanyFacts → `fundamentals` |
 | POST | `/api/admin/refresh-prices?tickers=` | Stooq/yfinance OHLCV → `prices` |
 | POST | `/api/admin/refresh-insiders?tickers=` | SEC Form 4 → `insider_transactions` |
-| POST | `/api/admin/ingest-default-feeds` | Poll 18 RSS feeds; `forceRefresh=true` by default |
+| POST | `/api/admin/ingest-default-feeds` | Poll 53 RSS feeds; `forceRefresh=true` by default |
 | POST | `/api/admin/dedup-articles` | Normalize dates, semantic dedup, keyword sentiment backfill |
 | GET | `/api/admin/status` | Table counts, freshness timestamps, job queue stats |
 | GET | `/api/admin/default-feeds` | Default RSS feed list |

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from ..repositories import Repository
+from .company_enrichment import metadata_from_submissions
 from .sec import normalize_company_facts
 
 
@@ -214,12 +215,33 @@ def build_company_metrics(row: dict, price: float | None = None) -> dict:
             sfcf_per_share = fcf / shares
     if shares not in (None, 0) and price is not None:
         market_cap = shares * price
-    if ebitda is not None and market_cap is not None:
+    ncf = row.get("ncf")
+    enterprise_value = None
+    if market_cap is not None:
         enterprise_value = market_cap + (debt or 0) - (cashneq or 0)
-        if enterprise_value > 0:
-            ebitda_ev = ebitda / enterprise_value
+        if enterprise_value <= 0:
+            enterprise_value = None
+    if ebitda is not None and enterprise_value:
+        ebitda_ev = ebitda / enterprise_value
+    ncf_per_share = None
+    cash_per_share = None
+    asset_per_share = None
+    rev_debt = None
+    mc_ev = None
+    if shares not in (None, 0):
+        if ncf is not None:
+            ncf_per_share = ncf / shares
+        if cashneq is not None:
+            cash_per_share = cashneq / shares
+        if assets is not None:
+            asset_per_share = assets / shares
+    if revenue is not None and debt not in (None, 0):
+        rev_debt = revenue / debt
+    if market_cap is not None and enterprise_value:
+        mc_ev = market_cap / enterprise_value
     return {
         "marketCap": market_cap,
+        "revenue": revenue,
         "sp": sales_per_share,
         "ebitdaEv": ebitda_ev,
         "tbp": book_value,
@@ -227,6 +249,11 @@ def build_company_metrics(row: dict, price: float | None = None) -> dict:
         "ep": eps,
         "cfop": cashflow_ops_per_share,
         "sfcfp": sfcf_per_share,
+        "ncfp": ncf_per_share,
+        "cashp": cash_per_share,
+        "assetp": asset_per_share,
+        "revDebt": rev_debt,
+        "mcEv": mc_ev,
     }
 
 
@@ -250,6 +277,12 @@ class FundamentalsService:
             payload = self.sec_client.fetch_company_facts(company["cik"])
             records = normalize_company_facts(company["id"], payload)
             inserted += self.repo.upsert_fundamentals(records)
+            try:
+                submissions = self.sec_client.fetch_submissions(company["cik"])
+                meta = metadata_from_submissions(submissions)
+                self.repo.update_company_metadata(ticker, meta)
+            except Exception:
+                pass
             refreshed.append(ticker)
         return {"tickers": refreshed, "recordsWritten": inserted}
 

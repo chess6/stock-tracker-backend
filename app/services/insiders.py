@@ -54,9 +54,8 @@ class InsidersService:
             filings_checked += 1
         return transactions
 
-    def buying_sums(self, tickers: list[str] | None = None) -> list[dict]:
-        rows = self.repo.fetch_insider_buying_sums(tickers)
-        return rows
+    def buying_sums(self, tickers: list[str] | None = None, min_buy6m: float | None = None) -> list[dict]:
+        return self.repo.fetch_insider_buying_sums(tickers, min_buy6m=min_buy6m)
 
     def sf2_payload(self, ticker: str) -> dict:
         rows = self.repo.fetch_insider_transactions(ticker)

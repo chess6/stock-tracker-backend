@@ -121,6 +121,65 @@ class Repository:
         ).fetchone()
         return dict(row) if row else None
 
+    def update_company_metadata(self, ticker: str, metadata: dict) -> None:
+        self.conn.execute(
+            """
+            UPDATE companies
+            SET sector = COALESCE(?, sector),
+                industry = COALESCE(?, industry),
+                exchange = COALESCE(?, exchange)
+            WHERE ticker = ?
+            """,
+            (
+                metadata.get("sector"),
+                metadata.get("industry"),
+                metadata.get("exchange"),
+                ticker.upper(),
+            ),
+        )
+        self.conn.commit()
+
+    def list_industry_groups(self) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT sector, industry, COUNT(*) AS company_count
+            FROM companies
+            WHERE industry IS NOT NULL AND TRIM(industry) != ''
+            GROUP BY sector, industry
+            ORDER BY sector, industry
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_industry_peers(self, industry: str, sector: str | None = None, limit: int = 100) -> list[dict]:
+        sql = """
+            SELECT ticker, name, sector, industry
+            FROM companies
+            WHERE industry = ?
+        """
+        params: list = [industry]
+        if sector:
+            sql += " AND sector = ?"
+            params.append(sector)
+        sql += " ORDER BY ticker LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_tickers_with_recent_prices(self, limit: int = 400) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT ticker
+            FROM prices
+            GROUP BY ticker
+            HAVING MAX(date) >= date('now', '-14 days')
+            ORDER BY MAX(date) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [row["ticker"] for row in rows]
+
     def list_companies_for_matching(self) -> list[dict]:
         rows = self.conn.execute("SELECT id, ticker, name FROM companies").fetchall()
         return [dict(row) for row in rows]
@@ -665,7 +724,11 @@ class Repository:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def fetch_insider_buying_sums(self, tickers: list[str] | None = None) -> list[dict]:
+    def fetch_insider_buying_sums(
+        self,
+        tickers: list[str] | None = None,
+        min_buy6m: float | None = None,
+    ) -> list[dict]:
         six_months_ago = (datetime.now(timezone.utc).date() - timedelta(days=183)).isoformat()
         three_months_ago = (datetime.now(timezone.utc).date() - timedelta(days=92)).isoformat()
         one_month_ago = (datetime.now(timezone.utc).date() - timedelta(days=31)).isoformat()
@@ -712,9 +775,10 @@ class Repository:
               AND (i.security_title IS NULL OR i.security_title NOT LIKE '%Preferred%')
               {ticker_filter}
             GROUP BY c.ticker, c.name
+            {"HAVING buy6m >= ?" if min_buy6m is not None else ""}
             ORDER BY buy6m DESC
             """,
-            params,
+            (*params, min_buy6m) if min_buy6m is not None else params,
         ).fetchall()
         return [
             {
