@@ -7,6 +7,7 @@ pandas_market_calendars
 feedparser
 trafilatura
 rapidfuzz
+vaderSentiment
 yfinance
 apscheduler
 pytest

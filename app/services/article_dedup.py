@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import re
+import string
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -8,6 +10,30 @@ try:
     from rapidfuzz import fuzz  # type: ignore
 except ImportError:  # pragma: no cover
     fuzz = None
+
+_PUNCTUATION_TABLE = str.maketrans("", "", string.punctuation)
+
+
+def compute_simhash(title: str, summary: str | None = None) -> str:
+    text = f"{(title or '').lower().strip()} {(summary or '').lower().strip()}"
+    text = text.translate(_PUNCTUATION_TABLE).strip()
+    words = text.split()
+    trigrams = [" ".join(words[i : i + 3]) for i in range(max(len(words) - 2, 1))]
+    if not trigrams:
+        trigrams = [text]
+    v = [0] * 64
+    for trigram in trigrams:
+        h = int(hashlib.md5(trigram.encode()).hexdigest(), 16) & ((1 << 64) - 1)
+        for i in range(64):
+            if h & (1 << i):
+                v[i] += 1
+            else:
+                v[i] -= 1
+    fingerprint = 0
+    for i in range(64):
+        if v[i] > 0:
+            fingerprint |= 1 << i
+    return f"{fingerprint:016x}"
 
 
 _TRACKING_PARAMS = {

@@ -113,7 +113,16 @@ def test_news_feed_returns_unique_articles(app, client):
                 "raw_source": "test",
             }
         )
-        repo.link_article_company(primary_id, company["id"], "ticker", 0.95)
+        repo.link_entity_match(
+            primary_id,
+            {
+                "company_id": company["id"],
+                "match_type": "headline_ticker",
+                "match_strategy": "headline_ticker",
+                "confidence": 0.96,
+                "extraction_stage": "enrichment",
+            },
+        )
 
     response = client.get("/api/news?limit=10")
     assert response.status_code == 200
@@ -122,3 +131,23 @@ def test_news_feed_returns_unique_articles(app, client):
     assert len(payload["articles"]) == 1
     assert payload["articles"][0]["title"] == "Apple launches product"
     assert payload["articles"][0]["tickers"] == ["AAPL"]
+
+
+def test_preferences_round_trip(app, client):
+    response = client.get("/api/preferences")
+    assert response.status_code == 200
+    assert response.get_json()["theme"] in {"dark", "light"}
+    assert isinstance(response.get_json()["portfolio"], list)
+
+    update_response = client.put(
+        "/api/preferences",
+        json={"theme": "light", "portfolio": ["AAPL", "MSFT"]},
+    )
+    assert update_response.status_code == 200
+    payload = update_response.get_json()
+    assert payload["theme"] == "light"
+    assert payload["portfolio"] == ["AAPL", "MSFT"]
+
+    reload_response = client.get("/api/preferences")
+    assert reload_response.status_code == 200
+    assert reload_response.get_json() == payload

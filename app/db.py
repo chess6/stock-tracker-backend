@@ -184,6 +184,92 @@ CREATE INDEX IF NOT EXISTS idx_fundamentals_company_filing_date ON fundamentals(
 CREATE INDEX IF NOT EXISTS idx_jobs_status_available ON ingestion_jobs(status, available_at, priority);
 CREATE INDEX IF NOT EXISTS idx_prices_ticker_date ON prices(ticker, date DESC);
 CREATE INDEX IF NOT EXISTS idx_insider_company_filing ON insider_transactions(company_id, filing_date DESC);
+
+CREATE TABLE IF NOT EXISTS watchlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS watchlist_tickers (
+    watchlist_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (watchlist_id, ticker),
+    FOREIGN KEY (watchlist_id) REFERENCES watchlists(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    theme TEXT NOT NULL DEFAULT 'dark',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS article_event_classifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    method TEXT NOT NULL DEFAULT 'rules',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE,
+    UNIQUE (article_id, event_type)
+);
+
+CREATE TABLE IF NOT EXISTS article_market_reactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    published_at TEXT,
+    sentiment_score REAL,
+    primary_event TEXT,
+    price_at_publish REAL,
+    return_1d REAL,
+    return_1w REAL,
+    benchmark_return_1d REAL,
+    abnormal_return_1d REAL,
+    computed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE,
+    UNIQUE (article_id, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS article_embedding_vectors (
+    article_id INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    vector_json TEXT NOT NULL,
+    content_hash TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (article_id, model),
+    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS domain_fetch_state (
+    domain TEXT PRIMARY KEY,
+    last_fetched_at TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    backoff_until TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_article_events_article ON article_event_classifications(article_id);
+CREATE INDEX IF NOT EXISTS idx_article_market_reactions_ticker ON article_market_reactions(ticker, published_at DESC);
+
+CREATE TABLE IF NOT EXISTS company_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    alias TEXT NOT NULL,
+    alias_type TEXT NOT NULL DEFAULT 'name',
+    normalized_alias TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    UNIQUE (company_id, normalized_alias)
+);
+
+CREATE INDEX IF NOT EXISTS idx_company_aliases_normalized ON company_aliases(normalized_alias);
+CREATE INDEX IF NOT EXISTS idx_company_aliases_company ON company_aliases(company_id);
 """
 
 
@@ -196,7 +282,7 @@ def configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
-    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA busy_timeout=30000;")
     conn.execute("PRAGMA temp_store=MEMORY;")
     return conn
 
@@ -253,12 +339,89 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         )
         conn.commit()
 
+    article_cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
+    article_migrations = {
+        "simhash_fingerprint": "TEXT",
+        "pipeline_status": "TEXT DEFAULT 'pending'",
+        "vader_compound": "REAL",
+        "vader_pos": "REAL",
+        "vader_neu": "REAL",
+        "vader_neg": "REAL",
+        "finbert_label": "TEXT",
+        "finbert_pos": "REAL",
+        "finbert_neu": "REAL",
+        "finbert_neg": "REAL",
+        "rank_score": "REAL",
+        "engagement_score": "REAL",
+        "novelty_score": "REAL",
+        "extraction_status": "TEXT",
+    }
+    for column, col_type in article_migrations.items():
+        if column not in article_cols:
+            conn.execute(f"ALTER TABLE articles ADD COLUMN {column} {col_type}")
+    if "simhash_fingerprint" not in article_cols:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_articles_simhash ON articles(simhash_fingerprint)"
+        )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_pipeline_status ON articles(pipeline_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_rank_score ON articles(rank_score DESC)")
+
+    article_company_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(article_company)").fetchall()
+    }
+    article_company_migrations = {
+        "match_strategy": "TEXT",
+        "extraction_stage": "TEXT",
+        "evidence_text": "TEXT",
+        "embedding_similarity": "REAL",
+        "updated_at": "TEXT",
+    }
+    for column, col_type in article_company_migrations.items():
+        if column not in article_company_cols:
+            conn.execute(f"ALTER TABLE article_company ADD COLUMN {column} {col_type}")
+    conn.execute(
+        """
+        UPDATE article_company
+        SET match_strategy = COALESCE(match_strategy, match_type, 'ticker_symbol'),
+            extraction_stage = COALESCE(extraction_stage, 'ingest'),
+            updated_at = COALESCE(updated_at, created_at)
+        WHERE match_strategy IS NULL OR extraction_stage IS NULL OR updated_at IS NULL
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_article_company_confidence ON article_company(article_id, confidence DESC)"
+    )
+    conn.commit()
+
+
+def _seed_default_watchlist(conn: sqlite3.Connection) -> None:
+    exists = conn.execute(
+        "SELECT 1 FROM watchlists WHERE name = ?", ("Portfolio",)
+    ).fetchone()
+    if not exists:
+        conn.execute(
+            "INSERT INTO watchlists (name, description) VALUES (?, ?)",
+            ("Portfolio", "Default portfolio watchlist"),
+        )
+        conn.commit()
+
+
+def _seed_default_preferences(conn: sqlite3.Connection) -> None:
+    exists = conn.execute("SELECT 1 FROM user_preferences WHERE id = 1").fetchone()
+    if not exists:
+        conn.execute(
+            "INSERT INTO user_preferences (id, theme) VALUES (1, 'dark')",
+        )
+        conn.commit()
+
 
 def init_db(path: str) -> None:
     conn = connect_db(path)
     try:
         conn.executescript(SCHEMA)
         migrate_schema(conn)
+        _seed_default_watchlist(conn)
+        _seed_default_preferences(conn)
         conn.commit()
     finally:
         conn.close()

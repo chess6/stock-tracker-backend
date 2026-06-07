@@ -1,34 +1,81 @@
 from __future__ import annotations
 
+import logging
 import re
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 from ..clients.sec import SecClient
 from ..repositories import Repository
 
+logger = logging.getLogger("stock_tracker.pipeline.insiders")
+
 
 class InsidersService:
-    def __init__(self, repo: Repository, sec_client: SecClient, max_filings_per_company: int = 40) -> None:
+    def __init__(
+        self,
+        repo: Repository,
+        sec_client: SecClient,
+        max_filings_per_company: int = 40,
+        request_delay_seconds: float = 0.15,
+        max_total_requests: int = 400,
+    ) -> None:
         self.repo = repo
         self.sec_client = sec_client
         self.max_filings_per_company = max_filings_per_company
+        self.request_delay_seconds = request_delay_seconds
+        self.max_total_requests = max_total_requests
 
-    def refresh_insiders(self, tickers: list[str]) -> dict:
+    def refresh_insiders(self, tickers: list[str], *, max_filings_per_company: int | None = None) -> dict:
+        filing_limit = (
+            max_filings_per_company
+            if max_filings_per_company is not None
+            else self.max_filings_per_company
+        )
+        logger.info("refresh_insiders start tickers=%d max_filings=%d", len(tickers), filing_limit)
+        t0 = time.monotonic()
         refreshed = []
         records_written = 0
+        total_sec_requests = 0
         for ticker in [item.upper() for item in tickers if item]:
+            if total_sec_requests >= self.max_total_requests:
+                logger.warning(
+                    "refresh_insiders stopping early — total SEC requests reached %d (limit %d)",
+                    total_sec_requests, self.max_total_requests,
+                )
+                break
             company = self.repo.get_company_by_ticker(ticker)
             if not company or not company.get("cik"):
+                logger.debug("refresh_insiders skip ticker=%s (no CIK)", ticker)
                 continue
-            transactions = self._fetch_form4_transactions(company["cik"])
+            transactions, requests_made = self._fetch_form4_transactions(
+                company["cik"],
+                filing_limit=filing_limit,
+                remaining_budget=self.max_total_requests - total_sec_requests,
+            )
+            total_sec_requests += requests_made
             if transactions:
                 records_written += self.repo.upsert_insider_transactions(company["id"], transactions)
+                logger.debug("refresh_insiders ticker=%s transactions=%d", ticker, len(transactions))
                 refreshed.append(ticker)
+        if total_sec_requests > 200:
+            logger.warning(
+                "refresh_insiders high request count: %d SEC requests across %d tickers",
+                total_sec_requests, len(refreshed),
+            )
+        elapsed = time.monotonic() - t0
+        logger.info("refresh_insiders done tickers=%d records=%d requests=%d elapsed=%.1fs",
+                    len(refreshed), records_written, total_sec_requests, elapsed)
         return {"tickers": refreshed, "recordsWritten": records_written}
 
-    def _fetch_form4_transactions(self, cik: str) -> list[dict]:
+    def _fetch_form4_transactions(
+        self, cik: str, *, filing_limit: int | None = None, remaining_budget: int | None = None,
+    ) -> tuple[list[dict], int]:
+        """Returns (transactions, sec_requests_made)."""
+        max_filings = filing_limit if filing_limit is not None else self.max_filings_per_company
         submissions = self.sec_client.fetch_submissions(cik)
+        sec_requests = 1  # the submissions fetch above
         recent = submissions.get("filings", {}).get("recent", {})
         forms = recent.get("form", [])
         accessions = recent.get("accessionNumber", [])
@@ -39,7 +86,10 @@ class InsidersService:
         for idx, form in enumerate(forms):
             if form not in {"4", "4/A"}:
                 continue
-            if filings_checked >= self.max_filings_per_company:
+            if filings_checked >= max_filings:
+                break
+            if remaining_budget is not None and sec_requests >= remaining_budget:
+                logger.debug("_fetch_form4_transactions budget exhausted cik=%s after %d requests", cik, sec_requests)
                 break
             accession = accessions[idx]
             filing_date = filing_dates[idx]
@@ -48,11 +98,15 @@ class InsidersService:
             try:
                 xml_text = self.sec_client.get_text(url)
             except Exception:
+                sec_requests += 1
                 filings_checked += 1
                 continue
+            sec_requests += 1
             transactions.extend(parse_form4_xml(xml_text, filing_date, accession))
             filings_checked += 1
-        return transactions
+            if self.request_delay_seconds > 0:
+                time.sleep(self.request_delay_seconds)
+        return transactions, sec_requests
 
     def buying_sums(self, tickers: list[str] | None = None, min_buy6m: float | None = None) -> list[dict]:
         return self.repo.fetch_insider_buying_sums(tickers, min_buy6m=min_buy6m)
@@ -91,6 +145,12 @@ def parse_form4_xml(xml_text: str, filing_date: str, accession: str) -> list[dic
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
+        logger.debug("parse_form4_xml ParseError accession=%s len=%d", accession, len(xml_text))
+        return []
+
+    root_tag = root.tag.rsplit("}", 1)[-1] if "}" in root.tag else root.tag
+    if root_tag.lower() in ("html", "document"):
+        logger.debug("parse_form4_xml got HTML instead of XML accession=%s", accession)
         return []
 
     def local(tag: str) -> str:

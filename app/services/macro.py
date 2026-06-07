@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
+
+from ..repositories import Repository
+
+logger = logging.getLogger("stock_tracker.pipeline.macro")
 
 try:
     import yfinance as yf  # type: ignore
@@ -31,6 +36,8 @@ MACRO_SYMBOLS = [
     {"id": "xlc", "label": "Communication", "symbol": "XLC", "group": "industries"},
     {"id": "vix", "label": "VIX", "symbol": "^VIX", "group": "risk"},
 ]
+
+MACRO_TICKERS = [entry["symbol"] for entry in MACRO_SYMBOLS if not entry["symbol"].startswith("^")]
 
 
 def _empty_item(entry: dict) -> dict:
@@ -63,7 +70,26 @@ def _item_from_closes(entry: dict, close: float, prev_close: float) -> dict:
 
 @dataclass
 class MacroSnapshotService:
+    repo: Repository | None = field(default=None)
+    prices_service: object | None = field(default=None)
+
+    def refresh_macro_prices(self) -> dict:
+        from .prices import PricesService
+
+        svc: PricesService = self.prices_service  # type: ignore[assignment]
+        if svc is None:
+            if self.repo is None:
+                return {"error": "no repository configured"}
+            svc = PricesService(self.repo)
+        logger.info("refresh_macro_prices start tickers=%d", len(MACRO_TICKERS))
+        return svc.refresh_prices(MACRO_TICKERS)
+
     def snapshot(self) -> dict:
+        if self.repo is not None:
+            cached = self._from_sqlite()
+            if cached is not None:
+                return cached
+
         if yf is None:
             return {
                 "items": [_empty_item(entry) for entry in MACRO_SYMBOLS],
@@ -89,6 +115,37 @@ class MacroSnapshotService:
                 "total": len(items),
                 "unavailable": unavailable,
             },
+        }
+
+    def _from_sqlite(self) -> dict | None:
+        """Try to serve macro snapshot entirely from cached prices table."""
+        batch = self.repo.fetch_prices_batch(MACRO_TICKERS, limit_per_ticker=2)
+        items = []
+        unavailable = 0
+        any_available = False
+        for entry in MACRO_SYMBOLS:
+            symbol = entry["symbol"]
+            if symbol.startswith("^"):
+                items.append(_empty_item(entry))
+                unavailable += 1
+                continue
+            rows = batch.get(symbol.upper(), [])
+            if len(rows) >= 2 and rows[0].get("close") is not None and rows[1].get("close") is not None:
+                items.append(_item_from_closes(entry, rows[0]["close"], rows[1]["close"]))
+                any_available = True
+            elif rows and rows[0].get("close") is not None:
+                item = _item_from_closes(entry, rows[0]["close"], rows[0]["close"])
+                item["changePct"] = None
+                items.append(item)
+                any_available = True
+            else:
+                items.append(_empty_item(entry))
+                unavailable += 1
+        if not any_available:
+            return None
+        return {
+            "items": items,
+            "meta": {"source": "sqlite", "total": len(items), "unavailable": unavailable},
         }
 
     def _batch_history(self):

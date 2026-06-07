@@ -15,6 +15,7 @@ class Config:
     sec_company_tickers_url: str = "https://www.sec.gov/files/company_tickers.json"
     request_timeout: int = 20
     news_http_ttl_seconds: int = 60 * 60
+    admin_api_key: str | None = None
 
     def __post_init__(self) -> None:
         if self.database_path is None:
@@ -27,6 +28,8 @@ class Config:
         timeout_value = os.getenv("STOCK_TRACKER_REQUEST_TIMEOUT")
         if timeout_value:
             self.request_timeout = int(timeout_value)
+        if self.admin_api_key is None:
+            self.admin_api_key = os.getenv("ADMIN_API_KEY")
 
     def to_flask_config(self) -> dict:
         return {
@@ -37,4 +40,5 @@ class Config:
             "SEC_COMPANY_TICKERS_URL": self.sec_company_tickers_url,
             "REQUEST_TIMEOUT": self.request_timeout,
             "NEWS_HTTP_TTL_SECONDS": self.news_http_ttl_seconds,
+            "ADMIN_API_KEY": self.admin_api_key,
         }

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from urllib.parse import quote_plus, urlparse
@@ -10,9 +13,12 @@ from xml.etree import ElementTree
 import requests
 
 from ..repositories import Repository, utc_now_iso
+
+logger = logging.getLogger("stock_tracker.pipeline.news")
 from .article_dedup import canonicalize_url, normalize_published_at
 from .article_enrichment import infer_topic_cluster, simple_sentiment, simhash_fingerprint
-from .ticker_matcher import match_tickers_in_text
+from .entity_linker_factory import create_entity_linker
+from .entity_linking import build_entity_link_text
 
 try:
     import feedparser  # type: ignore
@@ -84,6 +90,11 @@ DEFAULT_FEEDS = [
     {"name": "AI Wire", "feed_url": "https://www.hpcwire.com/aiwire/feed/", "category": "ai"},
     {"name": "TLDR AI", "feed_url": "https://tldr.tech/api/rss/ai", "category": "ai"},
 ]
+
+# Cap wall-clock time per feed so one slow source cannot block the full ingest run.
+DEFAULT_FEED_TIMEOUT_SECONDS = 180
+# Cap articles per feed so high-volume RSS sources (Reddit, Google News) do not dominate ingest.
+DEFAULT_MAX_ARTICLES_PER_FEED = 25
 
 
 class _HTMLStripper(HTMLParser):
@@ -183,8 +194,19 @@ class NewsService:
         self.repo.put_cached_http_response(cache_key, url, response.status_code, body, expires_at)
         return body
 
-    def _match_companies(self, text: str) -> list[tuple[int, str, float]]:
-        return match_tickers_in_text(text, self.repo.list_companies_for_matching())
+    def _link_article_entities(
+        self,
+        article_id: int,
+        text: str,
+        *,
+        companies: list[dict] | None = None,
+        stage: str = "ingest",
+        defer_commit: bool = False,
+    ) -> list[str]:
+        linker = create_entity_linker(self.repo, companies=companies, enable_embedding_profiles=False)
+        matches = linker.link_entities(text, stage=stage, enable_embeddings=False)
+        self.repo.save_entity_matches(article_id, matches, defer_commit=defer_commit)
+        return [match.ticker for match in matches]
 
     def ingest_feed(
         self,
@@ -195,10 +217,40 @@ class NewsService:
         extract_articles: bool = True,
         max_articles: int | None = None,
         force_refresh: bool = False,
+        feed_timeout_seconds: float | None = None,
+        skip_dedup: bool = False,
+        skip_events: bool = False,
+        _companies_cache: list[dict] | None = None,
+        _prefetched_body: str | None = None,
     ) -> dict:
-        feed_body = self._fetch_cached_text(feed_url, "feed", force_refresh=force_refresh)
+        deadline = None
+        if feed_timeout_seconds is not None and feed_timeout_seconds > 0:
+            deadline = time.monotonic() + feed_timeout_seconds
+
+        def _timed_out() -> bool:
+            return deadline is not None and time.monotonic() >= deadline
+
+        logger.info("ingest_feed start name=%r category=%s extract=%s max_articles=%s timeout=%s",
+                    name, category, extract_articles, max_articles, feed_timeout_seconds)
+        t0 = time.monotonic()
+        if _prefetched_body is not None:
+            feed_body = _prefetched_body
+        else:
+            feed_body = self._fetch_cached_text(feed_url, "feed", force_refresh=force_refresh)
+        if _timed_out():
+            logger.warning("ingest_feed timeout before parsing name=%r", name)
+            feed_id = self.repo.upsert_feed(
+                {
+                    "name": name,
+                    "feed_url": feed_url,
+                    "domain": urlparse(feed_url).netloc,
+                    "category": category,
+                    "last_polled_at": utc_now_iso(),
+                }
+            )
+            return {"feedId": feed_id, "articlesProcessed": 0, "timedOut": True}
         entries = parse_feed(feed_body)
-        if max_articles is not None:
+        if max_articles is not None and max_articles > 0:
             entries = entries[:max_articles]
         feed_id = self.repo.upsert_feed(
             {
@@ -209,8 +261,12 @@ class NewsService:
                 "last_polled_at": utc_now_iso(),
             }
         )
+        companies = _companies_cache or self.repo.list_companies_for_matching()
+        batch_mode = skip_dedup and skip_events
         article_count = 0
         for entry in entries:
+            if _timed_out():
+                break
             article_url = canonicalize_url(entry["link"]) or entry["link"]
             body_text = strip_html(entry.get("summary") or "")
             if extract_articles:
@@ -238,41 +294,106 @@ class NewsService:
                     "sentiment_score": sentiment_score,
                     "topic_cluster_id": topic_cluster_id,
                     "raw_source": f"feed:{feed_id}",
-                }
+                },
+                skip_dedup=skip_dedup,
+                defer_commit=batch_mode,
             )
+            fingerprint = simhash_fingerprint(enrichment_text)
             self.repo.upsert_embedding_metadata(
                 article_id,
                 model="simhash",
-                content_hash=simhash_fingerprint(enrichment_text),
-                storage_key=simhash_fingerprint(enrichment_text),
+                content_hash=fingerprint,
+                storage_key=fingerprint,
+                defer_commit=batch_mode,
             )
-            match_text = " ".join(filter(None, [entry.get("title"), entry.get("summary"), body_text]))
-            linked_tickers = []
-            for company_id, match_type, confidence in self._match_companies(match_text):
-                self.repo.link_article_company(article_id, company_id, match_type, confidence)
-                company = self.repo.conn.execute(
-                    "SELECT ticker FROM companies WHERE id = ?", (company_id,)
-                ).fetchone()
-                if company and company[0]:
-                    linked_tickers.append(company[0])
-            self._emit_news_ingested(article_id, linked_tickers, sentiment_label)
+            match_text = build_entity_link_text(
+                entry.get("title") or "",
+                entry.get("summary"),
+                body_text,
+            )
+            linked_tickers = self._link_article_entities(
+                article_id,
+                match_text,
+                companies=companies,
+                stage="ingest",
+                defer_commit=batch_mode,
+            )
+            if not skip_events:
+                self._emit_news_ingested(article_id, linked_tickers, sentiment_label)
             article_count += 1
-        return {"feedId": feed_id, "articlesProcessed": article_count}
+        if batch_mode:
+            self.repo.conn.commit()
+        elapsed = time.monotonic() - t0
+        timed_out = _timed_out()
+        logger.info("ingest_feed done name=%r articles=%d timedOut=%s elapsed=%.1fs",
+                    name, article_count, timed_out, elapsed)
+        return {"feedId": feed_id, "articlesProcessed": article_count, "timedOut": timed_out}
 
     def default_feeds(self) -> list[dict]:
         return list(DEFAULT_FEEDS)
+
+    def _prefetch_feeds(
+        self,
+        feed_list: list[dict],
+        *,
+        force_refresh: bool = False,
+        max_workers: int = 10,
+        per_feed_timeout: float = 30,
+    ) -> dict[str, str]:
+        """Fetch all RSS feed XMLs concurrently. Returns {feed_url: xml_text}."""
+        prefetched: dict[str, str] = {}
+
+        def _fetch_one(feed_url: str) -> tuple[str, str | None]:
+            try:
+                response = self.session.get(feed_url, timeout=per_feed_timeout)
+                response.raise_for_status()
+                return feed_url, response.text
+            except Exception as exc:
+                logger.warning("prefetch failed url=%s: %s", feed_url, exc)
+                return feed_url, None
+
+        urls = [f["feed_url"] for f in feed_list]
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_fetch_one, url): url for url in urls}
+            for future in as_completed(futures):
+                url, body = future.result()
+                if body is not None:
+                    prefetched[url] = body
+
+        logger.info("prefetch done feeds=%d/%d", len(prefetched), len(urls))
+        return prefetched
 
     def ingest_default_feeds(
         self,
         *,
         extract_articles: bool = True,
-        max_articles_per_feed: int | None = None,
+        max_articles_per_feed: int | None = DEFAULT_MAX_ARTICLES_PER_FEED,
         force_refresh: bool = False,
+        feed_timeout_seconds: float = DEFAULT_FEED_TIMEOUT_SECONDS,
+        tickers: list[str] | None = None,
     ) -> dict:
+        feed_list = self.default_feeds()
+        logger.info("ingest_default_feeds start feeds=%d extract=%s max_per_feed=%s timeout=%gs tickers=%s",
+                    len(feed_list), extract_articles, max_articles_per_feed, feed_timeout_seconds,
+                    len(tickers) if tickers else "all")
+        t0 = time.monotonic()
+
+        all_companies = self.repo.list_companies_for_matching()
+        if tickers:
+            ticker_set = {t.upper() for t in tickers}
+            companies = [c for c in all_companies if (c.get("ticker") or "").upper() in ticker_set]
+            logger.info("ticker filter: %d/%d companies", len(companies), len(all_companies))
+        else:
+            companies = all_companies
+
+        logger.info("prefetching %d RSS feeds in parallel...", len(feed_list))
+        prefetched = self._prefetch_feeds(feed_list, force_refresh=force_refresh)
+
         results = []
         total_articles = 0
         failed_feeds = 0
-        for feed in self.default_feeds():
+        timed_out_feeds = 0
+        for feed in feed_list:
             feed_result = {
                 "name": feed["name"],
                 "category": feed["category"],
@@ -288,21 +409,39 @@ class NewsService:
                     extract_articles=extract_articles,
                     max_articles=max_articles_per_feed,
                     force_refresh=force_refresh,
+                    feed_timeout_seconds=feed_timeout_seconds,
+                    skip_dedup=True,
+                    skip_events=True,
+                    _companies_cache=companies,
+                    _prefetched_body=prefetched.get(feed["feed_url"]),
                 )
                 feed_result["articlesProcessed"] = result["articlesProcessed"]
                 feed_result["feedId"] = result["feedId"]
                 total_articles += result["articlesProcessed"]
+                if result.get("timedOut"):
+                    feed_result["status"] = "timeout"
+                    feed_result["error"] = f"Exceeded {feed_timeout_seconds:g}s per-feed timeout"
+                    timed_out_feeds += 1
             except requests.RequestException as exc:
+                logger.warning("ingest_default_feeds feed error name=%r: %s", feed["name"], exc)
                 feed_result["status"] = "error"
                 feed_result["error"] = str(exc)
                 failed_feeds += 1
             results.append(feed_result)
         dates_normalized = self.repo.normalize_published_dates()
         deduped = self.repo.deduplicate_articles()
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "ingest_default_feeds done feeds=%d articles=%d failed=%d timedOut=%d elapsed=%.1fs",
+            len(results), total_articles, failed_feeds, timed_out_feeds, elapsed,
+        )
         return {
             "feedsProcessed": len(results),
             "articlesProcessed": total_articles,
             "failedFeeds": failed_feeds,
+            "timedOutFeeds": timed_out_feeds,
+            "feedTimeoutSeconds": feed_timeout_seconds,
+            "maxArticlesPerFeed": max_articles_per_feed,
             "datesNormalized": dates_normalized,
             "deduplication": deduped,
             "results": results,

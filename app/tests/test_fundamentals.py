@@ -4,6 +4,36 @@ from app.services.fundamentals import pivot_fundamentals_rows
 from app.services.sec import normalize_company_facts
 
 
+def test_normalize_company_facts_maps_us_gaap_shares_outstanding():
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "CommonStockSharesOutstanding": {
+                    "units": {
+                        "shares": [
+                            {
+                                "val": 12_116_000_000,
+                                "fy": 2026,
+                                "fp": "Q1",
+                                "form": "10-Q",
+                                "filed": "2026-04-30",
+                                "end": "2026-03-31",
+                                "accn": "1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    rows = normalize_company_facts(7489, payload)
+    shares = [row for row in rows if row["metric"] == "sharesbas"]
+    assert len(shares) == 1
+    assert shares[0]["value"] == 12_116_000_000
+    assert shares[0]["xbrl_concept"] == "CommonStockSharesOutstanding"
+
+
 def test_normalize_company_facts_maps_core_metrics():
     payload = {
         "facts": {

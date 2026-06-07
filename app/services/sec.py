@@ -62,6 +62,11 @@ SEC_METRIC_CONFIG = {
         "concepts": ["NetIncomeLoss"],
         "units": ("USD",),
     },
+    "compinc": {
+        "taxonomy": "us-gaap",
+        "concepts": ["ComprehensiveIncomeNetOfTax"],
+        "units": ("USD",),
+    },
     "taxexp": {
         "taxonomy": "us-gaap",
         "concepts": ["IncomeTaxExpenseBenefit"],
@@ -124,7 +129,7 @@ SEC_METRIC_CONFIG = {
     },
     "debtcurrent": {
         "taxonomy": "us-gaap",
-        "concepts": ["DebtCurrent", "LongTermDebtCurrent"],
+        "concepts": ["DebtCurrent", "ShortTermBorrowings", "LongTermDebtCurrent"],
         "units": ("USD",),
     },
     "debtlt": {
@@ -154,6 +159,21 @@ SEC_METRIC_CONFIG = {
     "payables": {
         "taxonomy": "us-gaap",
         "concepts": ["AccountsPayableCurrent"],
+        "units": ("USD",),
+    },
+    "retearn": {
+        "taxonomy": "us-gaap",
+        "concepts": ["RetainedEarningsAccumulatedDeficit"],
+        "units": ("USD",),
+    },
+    "goodwill": {
+        "taxonomy": "us-gaap",
+        "concepts": ["Goodwill"],
+        "units": ("USD",),
+    },
+    "intangibles": {
+        "taxonomy": "us-gaap",
+        "concepts": ["IntangibleAssetsNetExcludingGoodwill"],
         "units": ("USD",),
     },
     "ncfo": {
@@ -194,16 +214,37 @@ SEC_METRIC_CONFIG = {
         ],
         "units": ("USD",),
     },
+    "ncfcommon": {
+        "taxonomy": "us-gaap",
+        "concepts": ["PaymentsForRepurchaseOfCommonStock"],
+        "units": ("USD",),
+    },
     "capex": {
         "taxonomy": "us-gaap",
         "concepts": ["PaymentsToAcquirePropertyPlantAndEquipment"],
         "units": ("USD",),
     },
+    "sbcomp": {
+        "taxonomy": "us-gaap",
+        "concepts": ["ShareBasedCompensation", "StockBasedCompensation", "AllocatedShareBasedCompensationExpense"],
+        "units": ("USD",),
+    },
     "sharesbas": {
-        "taxonomy": "dei",
-        "concepts": [
-            "EntityCommonStockSharesOutstanding",
-            "EntityPublicFloat",
+        "sources": [
+            {
+                "taxonomy": "dei",
+                "concepts": [
+                    "EntityCommonStockSharesOutstanding",
+                ],
+            },
+            {
+                "taxonomy": "us-gaap",
+                "concepts": [
+                    "CommonStockSharesOutstanding",
+                    "CommonStockSharesIssued",
+                    "WeightedAverageNumberOfSharesOutstandingBasic",
+                ],
+            },
         ],
         "units": ("shares",),
     },
@@ -250,30 +291,71 @@ def _observation_record(company_id: int, metric: str, config: dict, concept: str
     }
 
 
+def _metric_sources(config: dict) -> list[dict]:
+    if "sources" in config:
+        return config["sources"]
+    return [{"taxonomy": config["taxonomy"], "concepts": config["concepts"]}]
+
+
+def _sharesbas_priority(concept: str) -> int:
+    order = {
+        "EntityCommonStockSharesOutstanding": 0,
+        "CommonStockSharesOutstanding": 1,
+        "CommonStockSharesIssued": 2,
+        "WeightedAverageNumberOfSharesOutstandingBasic": 3,
+        "EntityPublicFloat": 4,
+    }
+    return order.get(concept, 99)
+
+
 def _extract_configured_metrics(company_id: int, facts: dict) -> list[dict]:
     results_by_key: dict[tuple, dict] = {}
     for metric, config in SEC_METRIC_CONFIG.items():
-        taxonomy_facts = facts.get(config["taxonomy"], {})
-        for concept in config["concepts"]:
-            concept_payload = taxonomy_facts.get(concept)
-            if not concept_payload:
-                continue
-            units = concept_payload.get("units", {})
-            for unit_name, observations in units.items():
-                if config["units"] and unit_name not in config["units"]:
+        for source in _metric_sources(config):
+            taxonomy_facts = facts.get(source["taxonomy"], {})
+            for concept in source["concepts"]:
+                concept_payload = taxonomy_facts.get(concept)
+                if not concept_payload:
                     continue
-                for observation in observations:
-                    record = _observation_record(company_id, metric, config, concept, unit_name, observation)
-                    if not record:
+                units = concept_payload.get("units", {})
+                for unit_name, observations in units.items():
+                    if config["units"] and unit_name not in config["units"]:
                         continue
-                    key = (
-                        metric,
-                        record["period_end"],
-                        record["dimension"],
-                        record["filing_date"],
-                        record["accession"],
-                    )
-                    results_by_key.setdefault(key, record)
+                    for observation in observations:
+                        record = _observation_record(
+                            company_id,
+                            metric,
+                            {**config, "taxonomy": source["taxonomy"]},
+                            concept,
+                            unit_name,
+                            observation,
+                        )
+                        if not record:
+                            continue
+                        if metric == "sharesbas" and not record["value"]:
+                            continue
+                        if metric == "sharesbas":
+                            key = (metric, record["period_end"], record["dimension"])
+                            existing = results_by_key.get(key)
+                            if existing is None:
+                                results_by_key[key] = record
+                                continue
+                            if _sharesbas_priority(concept) < _sharesbas_priority(existing["xbrl_concept"]):
+                                results_by_key[key] = record
+                            elif (
+                                _sharesbas_priority(concept) == _sharesbas_priority(existing["xbrl_concept"])
+                                and (record.get("filing_date") or "") > (existing.get("filing_date") or "")
+                            ):
+                                results_by_key[key] = record
+                            continue
+                        key = (
+                            metric,
+                            record["period_end"],
+                            record["dimension"],
+                            record["filing_date"],
+                            record["accession"],
+                        )
+                        results_by_key.setdefault(key, record)
     return list(results_by_key.values())
 
 

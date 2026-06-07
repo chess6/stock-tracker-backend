@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 
 from app.config import Config
 from app.db import connect_db, init_db
+from app.logging_config import setup_logging
+from app.repositories import Repository
 from app.workers.handlers import build_context
 from app.workers.runner import WorkerRunner
 
@@ -21,29 +23,46 @@ except ImportError:  # pragma: no cover
 DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "AMD", "GOOGL", "AMZN", "META", "TSLA"]
 
 
-def enqueue_scheduled_jobs(repo, tickers: list[str]) -> None:
-    repo.enqueue_job("sync_companies", {}, priority=10)
-    repo.enqueue_job("refresh_fundamentals", {"tickers": tickers}, priority=20)
-    repo.enqueue_job("refresh_prices", {"tickers": tickers}, priority=30)
-    repo.enqueue_job("refresh_insiders", {"tickers": tickers}, priority=40)
-    repo.enqueue_job(
-        "ingest_default_feeds",
-        {"extract_articles": False, "max_articles_per_feed": 25, "force_refresh": True},
-        priority=50,
-    )
+def _with_scheduler_repo(database_path: str, callback) -> None:
+    """APScheduler jobs run in a threadpool; use a thread-local SQLite connection."""
+    conn = connect_db(database_path)
+    try:
+        callback(Repository(conn))
+    finally:
+        conn.close()
 
 
-def enqueue_feed_poll(repo) -> None:
-    repo.enqueue_job(
-        "ingest_default_feeds",
-        {"extract_articles": False, "max_articles_per_feed": 25, "force_refresh": True},
-        priority=5,
-    )
+def enqueue_scheduled_jobs(database_path: str, tickers: list[str]) -> None:
+    def _enqueue(repo: Repository) -> None:
+        repo.enqueue_job("sync_companies", {}, priority=10)
+        repo.enqueue_job("refresh_fundamentals", {"tickers": tickers}, priority=20)
+        repo.enqueue_job("refresh_prices", {"tickers": tickers}, priority=30)
+        repo.enqueue_job("refresh_macro", {}, priority=35)
+        repo.enqueue_job("refresh_insiders", {"tickers": tickers}, priority=40)
+        repo.enqueue_job(
+            "ingest_default_feeds",
+            {"extract_articles": False, "max_articles_per_feed": 25, "force_refresh": True},
+            priority=50,
+        )
+        repo.enqueue_job("enrich_articles", {"limit": 50}, priority=55)
+
+    _with_scheduler_repo(database_path, _enqueue)
+
+
+def enqueue_feed_poll(database_path: str) -> None:
+    def _enqueue(repo: Repository) -> None:
+        repo.enqueue_job(
+            "ingest_default_feeds",
+            {"extract_articles": False, "max_articles_per_feed": 25, "force_refresh": True},
+            priority=5,
+        )
+
+    _with_scheduler_repo(database_path, _enqueue)
 
 
 def main() -> None:
     load_dotenv()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging()
     config = Config()
     init_db(config.database_path)
     conn = connect_db(config.database_path)
@@ -68,14 +87,14 @@ def main() -> None:
     if BackgroundScheduler is not None:
         scheduler = BackgroundScheduler()
         scheduler.add_job(
-            lambda: enqueue_scheduled_jobs(ctx.repo, tickers),
+            lambda: enqueue_scheduled_jobs(config.database_path, tickers),
             CronTrigger(hour=2, minute=0),
             id="nightly_etl",
             replace_existing=True,
         )
         if IntervalTrigger is not None:
             scheduler.add_job(
-                lambda: enqueue_feed_poll(ctx.repo),
+                lambda: enqueue_feed_poll(config.database_path),
                 IntervalTrigger(minutes=45),
                 id="rss_poll",
                 replace_existing=True,

@@ -15,6 +15,17 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _news_display_match_clause(column_alias: str) -> tuple[str, list[str]]:
+    from .services.entity_linking import NEWS_DISPLAY_MATCH_STRATEGIES
+
+    strategies = sorted(NEWS_DISPLAY_MATCH_STRATEGIES)
+    placeholders = ",".join("?" for _ in strategies)
+    return (
+        f"COALESCE({column_alias}.match_strategy, {column_alias}.match_type, '') IN ({placeholders})",
+        strategies,
+    )
+
+
 class Repository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
@@ -358,6 +369,48 @@ class Repository:
     def deduplicate_articles(self, lookback: int = 2000) -> dict:
         from .services.article_dedup import find_semantic_duplicate
 
+        exact_dupes = self.conn.execute(
+            """
+            UPDATE articles
+            SET duplicate_of_article_id = (
+                SELECT a2.id FROM articles a2
+                WHERE a2.content_hash = articles.content_hash
+                  AND a2.id < articles.id
+                  AND a2.duplicate_of_article_id IS NULL
+                ORDER BY a2.id ASC LIMIT 1
+            )
+            WHERE duplicate_of_article_id IS NULL
+              AND content_hash IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM articles a2
+                  WHERE a2.content_hash = articles.content_hash
+                    AND a2.id < articles.id
+                    AND a2.duplicate_of_article_id IS NULL
+              )
+            """
+        ).rowcount
+
+        simhash_dupes = self.conn.execute(
+            """
+            UPDATE articles
+            SET duplicate_of_article_id = (
+                SELECT a2.id FROM articles a2
+                WHERE a2.simhash_fingerprint = articles.simhash_fingerprint
+                  AND a2.id < articles.id
+                  AND a2.duplicate_of_article_id IS NULL
+                ORDER BY a2.id ASC LIMIT 1
+            )
+            WHERE duplicate_of_article_id IS NULL
+              AND simhash_fingerprint IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM articles a2
+                  WHERE a2.simhash_fingerprint = articles.simhash_fingerprint
+                    AND a2.id < articles.id
+                    AND a2.duplicate_of_article_id IS NULL
+              )
+            """
+        ).rowcount
+
         rows = self.conn.execute(
             """
             SELECT id, title, summary
@@ -369,13 +422,15 @@ class Repository:
             (lookback,),
         ).fetchall()
         canonical: list[dict] = []
+        fuzzy_window = 50
         marked = 0
         for row in rows:
             article = dict(row)
+            recent_canonical = canonical[-fuzzy_window:] if len(canonical) > fuzzy_window else canonical
             duplicate_id = find_semantic_duplicate(
                 article["title"],
                 article.get("summary"),
-                canonical,
+                recent_canonical,
             )
             if duplicate_id is not None:
                 self.conn.execute(
@@ -386,22 +441,46 @@ class Repository:
             else:
                 canonical.append(article)
         self.conn.commit()
-        return {"scanned": len(rows), "markedDuplicates": marked, "uniqueRemaining": len(canonical)}
+        return {
+            "scanned": len(rows),
+            "exactDuplicates": exact_dupes,
+            "simhashDuplicates": simhash_dupes,
+            "fuzzyDuplicates": marked,
+            "markedDuplicates": exact_dupes + simhash_dupes + marked,
+            "uniqueRemaining": len(canonical),
+        }
 
-    def upsert_article(self, article: dict) -> int:
+    def upsert_article(self, article: dict, *, skip_dedup: bool = False, defer_commit: bool = False) -> int:
+        from .services.article_dedup import compute_simhash
+
+        fingerprint = article.get("simhash_fingerprint") or compute_simhash(
+            article["title"], article.get("summary")
+        )
         duplicate_id = article.get("duplicate_of_article_id")
-        if duplicate_id is None:
-            duplicate_id = self.find_duplicate_article(
-                article["title"],
-                article.get("summary"),
-            )
+        if duplicate_id is None and not skip_dedup:
+            match = self.conn.execute(
+                """
+                SELECT id FROM articles
+                WHERE simhash_fingerprint = ? AND duplicate_of_article_id IS NULL
+                LIMIT 1
+                """,
+                (fingerprint,),
+            ).fetchone()
+            if match:
+                duplicate_id = match["id"]
+            else:
+                duplicate_id = self.find_duplicate_article(
+                    article["title"],
+                    article.get("summary"),
+                )
         cursor = self.conn.execute(
             """
             INSERT INTO articles (
                 canonical_url, url_hash, title, summary, body_text, source_domain,
                 published_at, fetched_at, content_hash, language, duplicate_of_article_id,
-                sentiment_label, sentiment_score, topic_cluster_id, raw_source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sentiment_label, sentiment_score, topic_cluster_id, raw_source,
+                simhash_fingerprint
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(url_hash) DO UPDATE SET
                 canonical_url=COALESCE(excluded.canonical_url, articles.canonical_url),
                 title=excluded.title,
@@ -414,6 +493,7 @@ class Repository:
                 language=COALESCE(excluded.language, articles.language),
                 duplicate_of_article_id=COALESCE(excluded.duplicate_of_article_id, articles.duplicate_of_article_id),
                 raw_source=COALESCE(excluded.raw_source, articles.raw_source),
+                simhash_fingerprint=COALESCE(excluded.simhash_fingerprint, articles.simhash_fingerprint),
                 updated_at=CURRENT_TIMESTAMP
             RETURNING id
             """,
@@ -433,24 +513,233 @@ class Repository:
                 article.get("sentiment_score"),
                 article.get("topic_cluster_id"),
                 article.get("raw_source"),
+                fingerprint,
             ),
         )
         article_id = cursor.fetchone()[0]
-        self.conn.commit()
+        if not defer_commit:
+            self.conn.commit()
         return article_id
 
-    def link_article_company(self, article_id: int, company_id: int, match_type: str, confidence: float) -> None:
+    def link_article_company(self, article_id: int, company_id: int, match_type: str, confidence: float, *, defer_commit: bool = False) -> None:
+        self.link_entity_match(
+            article_id,
+            {
+                "company_id": company_id,
+                "match_type": match_type,
+                "match_strategy": match_type,
+                "confidence": confidence,
+                "extraction_stage": "ingest",
+            },
+            defer_commit=defer_commit,
+        )
+
+    def link_entity_match(self, article_id: int, match: dict, *, defer_commit: bool = False) -> None:
+        now = utc_now_iso()
         self.conn.execute(
             """
-            INSERT INTO article_company (article_id, company_id, match_type, confidence)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO article_company (
+                article_id, company_id, match_type, confidence,
+                match_strategy, extraction_stage, evidence_text, embedding_similarity, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(article_id, company_id) DO UPDATE SET
                 match_type=excluded.match_type,
-                confidence=excluded.confidence
+                confidence=excluded.confidence,
+                match_strategy=excluded.match_strategy,
+                extraction_stage=excluded.extraction_stage,
+                evidence_text=excluded.evidence_text,
+                embedding_similarity=excluded.embedding_similarity,
+                updated_at=excluded.updated_at
+            WHERE excluded.confidence >= article_company.confidence
             """,
-            (article_id, company_id, match_type, confidence),
+            (
+                article_id,
+                match["company_id"],
+                match.get("match_type") or match.get("match_strategy") or "entity",
+                match["confidence"],
+                match.get("match_strategy") or match.get("match_type") or "entity",
+                match.get("extraction_stage") or "ingest",
+                match.get("evidence_text"),
+                match.get("embedding_similarity"),
+                now,
+            ),
+        )
+        if not defer_commit:
+            self.conn.commit()
+
+    def save_entity_matches(
+        self,
+        article_id: int,
+        matches: list,
+        *,
+        merge: bool = False,
+        defer_commit: bool = False,
+    ) -> int:
+        from .services.entity_linking import EntityMatch
+
+        saved = 0
+        company_ids = set()
+        for item in matches:
+            if isinstance(item, EntityMatch):
+                payload = {
+                    "company_id": item.company_id,
+                    "match_type": item.match_strategy,
+                    "match_strategy": item.match_strategy,
+                    "confidence": item.confidence,
+                    "extraction_stage": item.extraction_stage,
+                    "evidence_text": item.evidence_text,
+                    "embedding_similarity": item.embedding_similarity,
+                }
+            else:
+                payload = item
+            company_ids.add(payload["company_id"])
+            self.link_entity_match(article_id, payload, defer_commit=True)
+            saved += 1
+
+        if merge:
+            self.conn.execute(
+                """
+                DELETE FROM article_company
+                WHERE article_id = ? AND extraction_stage = 'ingest'
+                """,
+                (article_id,),
+            )
+            if company_ids:
+                placeholders = ",".join("?" for _ in company_ids)
+                self.conn.execute(
+                    f"""
+                    DELETE FROM article_company
+                    WHERE article_id = ?
+                      AND extraction_stage = 'enrichment'
+                      AND company_id NOT IN ({placeholders})
+                    """,
+                    (article_id, *company_ids),
+                )
+            else:
+                self.conn.execute(
+                    """
+                    DELETE FROM article_company
+                    WHERE article_id = ? AND extraction_stage = 'enrichment'
+                    """,
+                    (article_id,),
+                )
+        if not defer_commit:
+            self.conn.commit()
+        return saved
+
+    def copy_article_entity_matches(self, source_article_id: int, target_article_id: int, *, defer_commit: bool = False) -> int:
+        rows = self.conn.execute(
+            """
+            SELECT company_id, match_type, confidence, match_strategy, extraction_stage,
+                   evidence_text, embedding_similarity
+            FROM article_company
+            WHERE article_id = ?
+            """,
+            (source_article_id,),
+        ).fetchall()
+        for row in rows:
+            self.link_entity_match(
+                target_article_id,
+                {
+                    "company_id": row["company_id"],
+                    "match_type": row["match_type"],
+                    "match_strategy": row["match_strategy"] or row["match_type"],
+                    "confidence": row["confidence"],
+                    "extraction_stage": row["extraction_stage"] or "ingest",
+                    "evidence_text": row["evidence_text"],
+                    "embedding_similarity": row["embedding_similarity"],
+                },
+                defer_commit=True,
+            )
+        if not defer_commit:
+            self.conn.commit()
+        return len(rows)
+
+    def upsert_curated_company_aliases(self) -> int:
+        from .services.company_aliases import CURATED_ALIASES, normalize_entity_text
+
+        companies_by_ticker = {
+            (company.get("ticker") or "").upper(): company
+            for company in self.list_companies_for_matching()
+        }
+        updated = 0
+        for ticker, aliases in CURATED_ALIASES.items():
+            company = companies_by_ticker.get(ticker.upper())
+            if not company:
+                continue
+            for alias in aliases:
+                normalized = normalize_entity_text(alias)
+                if len(normalized) < 2:
+                    continue
+                self.conn.execute(
+                    """
+                    INSERT INTO company_aliases (company_id, alias, alias_type, normalized_alias)
+                    VALUES (?, ?, 'curated', ?)
+                    ON CONFLICT(company_id, normalized_alias) DO UPDATE SET
+                        alias_type = 'curated',
+                        alias = excluded.alias
+                    """,
+                    (company["id"], alias, normalized),
+                )
+                updated += 1
+        self.conn.commit()
+        return updated
+
+    def seed_company_aliases(self) -> int:
+        from .services.company_aliases import build_alias_records
+
+        self.upsert_curated_company_aliases()
+        existing = self.conn.execute("SELECT COUNT(*) FROM company_aliases").fetchone()[0]
+        if existing:
+            return existing
+        companies = self.list_companies_for_matching()
+        records = build_alias_records(companies)
+        if not records:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO company_aliases (company_id, alias, alias_type, normalized_alias)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(company_id, normalized_alias) DO NOTHING
+            """,
+            [
+                (record["company_id"], record["alias"], record["alias_type"], record["normalized_alias"])
+                for record in records
+            ],
         )
         self.conn.commit()
+        return len(records)
+
+    def get_alias_index(self) -> dict[str, list[dict]]:
+        rows = self.conn.execute(
+            """
+            SELECT ca.company_id, ca.alias, ca.alias_type, ca.normalized_alias, c.ticker
+            FROM company_aliases ca
+            JOIN companies c ON c.id = ca.company_id
+            ORDER BY ca.company_id, ca.alias_type
+            """
+        ).fetchall()
+        index: dict[str, list[dict]] = {}
+        for row in rows:
+            ticker = (row["ticker"] or "").upper()
+            index.setdefault(ticker, []).append(dict(row))
+        return index
+
+    def get_boosted_tickers(self) -> set[str]:
+        tickers: set[str] = set()
+        portfolio = self.get_watchlist("Portfolio")
+        if portfolio:
+            tickers.update(ticker.upper() for ticker in portfolio.get("tickers") or [])
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT ticker
+            FROM watchlist_tickers
+            """
+        ).fetchall()
+        for row in rows:
+            if row["ticker"]:
+                tickers.add(row["ticker"].upper())
+        return tickers
 
     def upsert_embedding_metadata(
         self,
@@ -460,6 +749,7 @@ class Repository:
         content_hash: str | None = None,
         storage_key: str | None = None,
         vector_dimensions: int | None = None,
+        defer_commit: bool = False,
     ) -> None:
         self.conn.execute(
             """
@@ -472,7 +762,8 @@ class Repository:
             """,
             (article_id, model, content_hash, storage_key, vector_dimensions),
         )
-        self.conn.commit()
+        if not defer_commit:
+            self.conn.commit()
 
     def list_unique_articles(
         self,
@@ -503,8 +794,9 @@ class Repository:
                 """
             )
             params.append(category.lower().strip())
+        display_clause, display_params = _news_display_match_clause("ac2")
         if tickers:
-            placeholders = ",".join("?" for _ in tickers)
+            ticker_placeholders = ",".join("?" for _ in tickers)
             clauses.append(
                 f"""
                 EXISTS (
@@ -512,17 +804,19 @@ class Repository:
                     FROM article_company ac2
                     JOIN companies c2 ON c2.id = ac2.company_id
                     WHERE ac2.article_id = a.id
-                      AND ac2.match_type = 'ticker'
-                      AND UPPER(c2.ticker) IN ({placeholders})
+                      AND ac2.confidence >= 0.85
+                      AND {display_clause}
+                      AND UPPER(c2.ticker) IN ({ticker_placeholders})
                 )
                 """
             )
-            params.extend([ticker.upper() for ticker in tickers])
+            params.extend([*display_params, *[ticker.upper() for ticker in tickers]])
         where_sql = " AND ".join(clauses)
         total = self.conn.execute(
             f"SELECT COUNT(*) FROM articles a WHERE {where_sql}",
             params,
         ).fetchone()[0]
+        ac_display_clause, ac_display_params = _news_display_match_clause("ac")
         rows = self.conn.execute(
             f"""
             SELECT
@@ -534,17 +828,30 @@ class Repository:
                 a.published_at,
                 a.source_domain,
                 a.sentiment_label,
+                a.sentiment_score,
+                a.vader_compound,
+                a.finbert_label,
+                a.rank_score,
                 a.topic_cluster_id,
+                (
+                    SELECT event_type
+                    FROM article_event_classifications ec
+                    WHERE ec.article_id = a.id
+                    ORDER BY ec.confidence DESC
+                    LIMIT 1
+                ) AS primary_event,
                 GROUP_CONCAT(DISTINCT c.ticker) AS tickers
             FROM articles a
-            LEFT JOIN article_company ac ON ac.article_id = a.id AND ac.match_type = 'ticker' AND ac.confidence >= 0.9
+            LEFT JOIN article_company ac ON ac.article_id = a.id
+                AND ac.confidence >= 0.85
+                AND {ac_display_clause}
             LEFT JOIN companies c ON c.id = ac.company_id
             WHERE {where_sql}
             GROUP BY a.id
-            ORDER BY a.published_at DESC, a.id DESC
+            ORDER BY COALESCE(a.rank_score, 0) DESC, a.published_at DESC, a.id DESC
             LIMIT ? OFFSET ?
             """,
-            [*params, limit, offset],
+            [*params, *ac_display_params, limit, offset],
         ).fetchall()
         articles = []
         for row in rows:
@@ -560,6 +867,11 @@ class Repository:
                     "publishedDate": row["published_at"],
                     "sourceDomain": row["source_domain"],
                     "sentimentLabel": row["sentiment_label"],
+                    "sentimentScore": row["sentiment_score"],
+                    "vaderCompound": row["vader_compound"],
+                    "finbertLabel": row["finbert_label"],
+                    "primaryEvent": row["primary_event"],
+                    "rankScore": row["rank_score"],
                     "topicCluster": row["topic_cluster_id"],
                     "tickers": tickers,
                 }
@@ -567,17 +879,20 @@ class Repository:
         return {"articles": articles, "total": total, "limit": limit, "offset": offset}
 
     def get_company_news(self, ticker: str, limit: int = 25) -> list[dict]:
+        display_clause, display_params = _news_display_match_clause("ac")
         rows = self.conn.execute(
-            """
+            f"""
             SELECT a.id, a.title, a.summary, a.body_text, a.canonical_url, a.published_at, a.source_domain
             FROM articles a
             JOIN article_company ac ON ac.article_id = a.id
+                AND ac.confidence >= 0.85
+                AND {display_clause}
             JOIN companies c ON c.id = ac.company_id
             WHERE c.ticker = ?
             ORDER BY a.published_at DESC, a.id DESC
             LIMIT ?
             """,
-            (ticker.upper(), limit),
+            [*display_params, ticker.upper(), limit],
         ).fetchall()
         return [
             {
@@ -652,17 +967,55 @@ class Repository:
         return len(payload)
 
     def fetch_prices(self, ticker: str, since: str | None = None, limit: int | None = None) -> list[dict]:
-        sql = "SELECT ticker, date, open, high, low, close, volume, source FROM prices WHERE ticker = ?"
+        sql = """
+            SELECT ticker, date, open, high, low, close, volume, source
+            FROM prices
+            WHERE ticker = ?
+        """
         params: list = [ticker.upper()]
         if since:
             sql += " AND date >= ?"
             params.append(since)
-        sql += " ORDER BY date DESC"
+        sql += " ORDER BY date DESC, CASE source WHEN 'stooq' THEN 0 ELSE 1 END"
         if limit:
             sql += " LIMIT ?"
             params.append(limit)
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
+
+    def fetch_prices_batch(
+        self,
+        tickers: list[str],
+        limit_per_ticker: int = 2,
+    ) -> dict[str, list[dict]]:
+        """Fetch recent prices for multiple tickers in a single query."""
+        if not tickers:
+            return {}
+        upper = [t.upper() for t in tickers]
+        placeholders = ",".join("?" for _ in upper)
+        sql = f"""
+            SELECT ticker, date, open, high, low, close, volume, source
+            FROM (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY ticker, date
+                           ORDER BY CASE source WHEN 'stooq' THEN 0 ELSE 1 END
+                       ) AS src_rank,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY ticker
+                           ORDER BY date DESC, CASE source WHEN 'stooq' THEN 0 ELSE 1 END
+                       ) AS date_rank
+                FROM prices
+                WHERE ticker IN ({placeholders})
+            )
+            WHERE src_rank = 1 AND date_rank <= ?
+            ORDER BY ticker, date DESC
+        """
+        rows = self.conn.execute(sql, [*upper, limit_per_ticker]).fetchall()
+        result: dict[str, list[dict]] = {t: [] for t in upper}
+        for row in rows:
+            result[row["ticker"]].append(dict(row))
+        return result
 
     def upsert_insider_transactions(self, company_id: int, transactions: Iterable[dict]) -> int:
         rows = [
@@ -792,6 +1145,130 @@ class Repository:
             for row in rows
         ]
 
+    # -- watchlists ---------------------------------------------------------
+
+    def list_watchlists(self) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT w.id, w.name, w.description, w.created_at, w.updated_at,
+                   COUNT(wt.ticker) AS ticker_count
+            FROM watchlists w
+            LEFT JOIN watchlist_tickers wt ON wt.watchlist_id = w.id
+            GROUP BY w.id
+            ORDER BY w.name
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_watchlist(self, name: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT id, name, description, created_at, updated_at FROM watchlists WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if not row:
+            return None
+        wl = dict(row)
+        ticker_rows = self.conn.execute(
+            "SELECT ticker, added_at FROM watchlist_tickers WHERE watchlist_id = ? ORDER BY ticker",
+            (wl["id"],),
+        ).fetchall()
+        wl["tickers"] = [r["ticker"] for r in ticker_rows]
+        return wl
+
+    def upsert_watchlist(self, name: str, description: str | None = None) -> int:
+        cursor = self.conn.execute(
+            """
+            INSERT INTO watchlists (name, description)
+            VALUES (?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                description = COALESCE(excluded.description, watchlists.description),
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING id
+            """,
+            (name, description),
+        )
+        wl_id = cursor.fetchone()[0]
+        self.conn.commit()
+        return wl_id
+
+    def add_ticker_to_watchlist(self, watchlist_id: int, ticker: str) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO watchlist_tickers (watchlist_id, ticker)
+            VALUES (?, ?)
+            ON CONFLICT(watchlist_id, ticker) DO NOTHING
+            """,
+            (watchlist_id, ticker.upper()),
+        )
+        self.conn.execute(
+            "UPDATE watchlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (watchlist_id,),
+        )
+        self.conn.commit()
+
+    def remove_ticker_from_watchlist(self, watchlist_id: int, ticker: str) -> None:
+        self.conn.execute(
+            "DELETE FROM watchlist_tickers WHERE watchlist_id = ? AND ticker = ?",
+            (watchlist_id, ticker.upper()),
+        )
+        self.conn.execute(
+            "UPDATE watchlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (watchlist_id,),
+        )
+        self.conn.commit()
+
+    def set_watchlist_tickers(self, watchlist_id: int, tickers: list[str]) -> None:
+        self.conn.execute(
+            "DELETE FROM watchlist_tickers WHERE watchlist_id = ?",
+            (watchlist_id,),
+        )
+        normalized = list({t.upper() for t in tickers if t.strip()})
+        if normalized:
+            self.conn.executemany(
+                "INSERT INTO watchlist_tickers (watchlist_id, ticker) VALUES (?, ?)",
+                [(watchlist_id, t) for t in sorted(normalized)],
+            )
+        self.conn.execute(
+            "UPDATE watchlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (watchlist_id,),
+        )
+        self.conn.commit()
+
+    def get_user_preferences(self) -> dict:
+        row = self.conn.execute(
+            "SELECT theme FROM user_preferences WHERE id = 1",
+        ).fetchone()
+        theme = row["theme"] if row else "dark"
+        wl = self.get_watchlist("Portfolio")
+        tickers = (wl or {}).get("tickers", [])
+        return {"theme": theme, "portfolio": tickers}
+
+    def update_user_preferences(
+        self,
+        *,
+        theme: str | None = None,
+        portfolio: list[str] | None = None,
+    ) -> dict:
+        if theme is not None:
+            self.conn.execute(
+                """
+                INSERT INTO user_preferences (id, theme)
+                VALUES (1, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    theme = excluded.theme,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (theme,),
+            )
+        if portfolio is not None:
+            wl_id = self.upsert_watchlist("Portfolio", description="Default portfolio watchlist")
+            self.set_watchlist_tickers(wl_id, portfolio)
+        else:
+            self.conn.commit()
+        return self.get_user_preferences()
+
+    # -- jobs ---------------------------------------------------------------
+
     def enqueue_job(self, job_type: str, payload: dict, priority: int = 100) -> int:
         cursor = self.conn.execute(
             """
@@ -808,26 +1285,22 @@ class Repository:
     def claim_next_job(self) -> dict | None:
         row = self.conn.execute(
             """
-            SELECT id, job_type, payload_json, attempt_count
-            FROM ingestion_jobs
-            WHERE status = 'queued' AND available_at <= CURRENT_TIMESTAMP
-            ORDER BY priority ASC, id ASC
-            LIMIT 1
+            UPDATE ingestion_jobs
+            SET status = 'running',
+                locked_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = (
+                SELECT id FROM ingestion_jobs
+                WHERE status = 'queued' AND available_at <= CURRENT_TIMESTAMP
+                ORDER BY priority ASC, id ASC
+                LIMIT 1
+            )
+            RETURNING id, job_type, payload_json, attempt_count
             """
         ).fetchone()
+        self.conn.commit()
         if not row:
             return None
-        updated = self.conn.execute(
-            """
-            UPDATE ingestion_jobs
-            SET status = 'running', locked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND status = 'queued'
-            """,
-            (row["id"],),
-        )
-        if updated.rowcount == 0:
-            return None
-        self.conn.commit()
         return {
             "id": row["id"],
             "job_type": row["job_type"],
@@ -852,6 +1325,444 @@ class Repository:
             (job_id, status, error_message),
         )
         self.conn.commit()
+
+    def get_article_by_id(self, article_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM articles WHERE id = ?", (article_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_articles_by_ids(self, article_ids: list[int]) -> dict[int, dict]:
+        if not article_ids:
+            return {}
+        placeholders = ",".join("?" for _ in article_ids)
+        rows = self.conn.execute(
+            f"SELECT * FROM articles WHERE id IN ({placeholders})",
+            article_ids,
+        ).fetchall()
+        return {row["id"]: dict(row) for row in rows}
+
+    def get_article_tickers(self, article_id: int) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT c.ticker
+            FROM article_company ac
+            JOIN companies c ON c.id = ac.company_id
+            WHERE ac.article_id = ? AND ac.confidence >= 0.80
+            ORDER BY ac.confidence DESC
+            """,
+            (article_id,),
+        ).fetchall()
+        return [row["ticker"] for row in rows]
+
+    def recover_stuck_pipeline_articles(self) -> int:
+        """Reset orphaned processing rows after a cancelled run or crashed request."""
+        cursor = self.conn.execute(
+            """
+            UPDATE articles
+            SET pipeline_status = 'pending', updated_at = CURRENT_TIMESTAMP
+            WHERE duplicate_of_article_id IS NULL
+              AND pipeline_status = 'processing'
+            """
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
+    def get_pipeline_status_counts(self) -> dict:
+        rows = self.conn.execute(
+            """
+            SELECT COALESCE(pipeline_status, 'pending') AS status, COUNT(*) AS count
+            FROM articles
+            WHERE duplicate_of_article_id IS NULL
+            GROUP BY COALESCE(pipeline_status, 'pending')
+            """
+        ).fetchall()
+        counts = {row["status"]: row["count"] for row in rows}
+        pending = counts.get("pending", 0) + counts.get("error", 0)
+        return {
+            "pending": pending,
+            "processing": counts.get("processing", 0),
+            "complete": counts.get("complete", 0),
+            "error": counts.get("error", 0),
+            "duplicate": self.conn.execute(
+                "SELECT COUNT(*) FROM articles WHERE duplicate_of_article_id IS NOT NULL"
+            ).fetchone()[0],
+            "by_status": counts,
+        }
+
+    def requeue_completed_articles(self, *, limit: int = 500) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE articles
+            SET pipeline_status = 'pending', updated_at = CURRENT_TIMESTAMP
+            WHERE id IN (
+                SELECT id
+                FROM articles
+                WHERE duplicate_of_article_id IS NULL
+                  AND pipeline_status = 'complete'
+                ORDER BY published_at DESC, id DESC
+                LIMIT ?
+            )
+            """,
+            (limit,),
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
+    def list_articles_for_retag(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        only_missing_enrichment: bool = False,
+    ) -> list[int]:
+        clauses = [
+            "duplicate_of_article_id IS NULL",
+            "pipeline_status = 'complete'",
+        ]
+        if only_missing_enrichment:
+            clauses.append(
+                """
+                NOT EXISTS (
+                    SELECT 1
+                    FROM article_company ac
+                    WHERE ac.article_id = articles.id
+                      AND ac.extraction_stage = 'enrichment'
+                )
+                """
+            )
+        where_sql = " AND ".join(clauses)
+        rows = self.conn.execute(
+            f"""
+            SELECT id
+            FROM articles
+            WHERE {where_sql}
+            ORDER BY published_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    def count_articles_for_retag(self, *, only_missing_enrichment: bool = False) -> int:
+        clauses = [
+            "duplicate_of_article_id IS NULL",
+            "pipeline_status = 'complete'",
+        ]
+        if only_missing_enrichment:
+            clauses.append(
+                """
+                NOT EXISTS (
+                    SELECT 1
+                    FROM article_company ac
+                    WHERE ac.article_id = articles.id
+                      AND ac.extraction_stage = 'enrichment'
+                )
+                """
+            )
+        where_sql = " AND ".join(clauses)
+        return self.conn.execute(
+            f"SELECT COUNT(*) FROM articles WHERE {where_sql}",
+        ).fetchone()[0]
+
+    def get_article_embedding_vector(self, article_id: int, *, model: str) -> list[float] | None:
+        row = self.conn.execute(
+            """
+            SELECT vector_json
+            FROM article_embedding_vectors
+            WHERE article_id = ? AND model = ?
+            """,
+            (article_id, model),
+        ).fetchone()
+        if not row:
+            return None
+        from .services.embeddings_service import vector_from_json
+
+        return vector_from_json(row["vector_json"])
+
+    def list_articles_pending_pipeline(self, *, limit: int = 25) -> list[int]:
+        rows = self.conn.execute(
+            """
+            SELECT id
+            FROM articles
+            WHERE duplicate_of_article_id IS NULL
+              AND COALESCE(pipeline_status, 'pending') IN ('pending', 'error')
+            ORDER BY published_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    def set_article_pipeline_status(self, article_id: int, status: str) -> None:
+        self.conn.execute(
+            "UPDATE articles SET pipeline_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, article_id),
+        )
+        self.conn.commit()
+
+    def set_article_extraction_status(self, article_id: int, status: str) -> None:
+        self.conn.execute(
+            "UPDATE articles SET extraction_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, article_id),
+        )
+        self.conn.commit()
+
+    def update_article_body(
+        self,
+        article_id: int,
+        body_text: str,
+        *,
+        content_hash: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE articles
+            SET body_text = ?, content_hash = COALESCE(?, content_hash), updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (body_text, content_hash, article_id),
+        )
+        self.conn.commit()
+
+    def update_article_sentiment(self, article_id: int, sentiment) -> None:
+        self.conn.execute(
+            """
+            UPDATE articles
+            SET sentiment_label = ?,
+                sentiment_score = ?,
+                vader_compound = ?,
+                vader_pos = ?,
+                vader_neu = ?,
+                vader_neg = ?,
+                finbert_label = ?,
+                finbert_pos = ?,
+                finbert_neu = ?,
+                finbert_neg = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                sentiment.label,
+                sentiment.score,
+                sentiment.vader_compound,
+                sentiment.vader_pos,
+                sentiment.vader_neu,
+                sentiment.vader_neg,
+                sentiment.finbert_label,
+                sentiment.finbert_pos,
+                sentiment.finbert_neu,
+                sentiment.finbert_neg,
+                article_id,
+            ),
+        )
+        self.conn.commit()
+
+    def update_article_ranking(
+        self,
+        article_id: int,
+        *,
+        rank_score: float,
+        novelty_score: float | None = None,
+        engagement_score: float | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE articles
+            SET rank_score = ?,
+                novelty_score = COALESCE(?, novelty_score),
+                engagement_score = COALESCE(?, engagement_score),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (rank_score, novelty_score, engagement_score, article_id),
+        )
+        self.conn.commit()
+
+    def mark_article_duplicate(self, article_id: int, duplicate_of: int) -> None:
+        self.conn.execute(
+            """
+            UPDATE articles
+            SET duplicate_of_article_id = ?, pipeline_status = 'duplicate', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (duplicate_of, article_id),
+        )
+        self.conn.commit()
+
+    def replace_article_events(self, article_id: int, events: list) -> None:
+        self.conn.execute(
+            "DELETE FROM article_event_classifications WHERE article_id = ?",
+            (article_id,),
+        )
+        if events:
+            self.conn.executemany(
+                """
+                INSERT INTO article_event_classifications (article_id, event_type, confidence, method)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(article_id, event_type) DO UPDATE SET
+                    confidence = excluded.confidence,
+                    method = excluded.method
+                """,
+                [(article_id, e.event_type, e.confidence, e.method) for e in events],
+            )
+        self.conn.commit()
+
+    def replace_article_market_reactions(self, article_id: int, reactions: list) -> None:
+        self.conn.execute(
+            "DELETE FROM article_market_reactions WHERE article_id = ?",
+            (article_id,),
+        )
+        if reactions:
+            self.conn.executemany(
+                """
+                INSERT INTO article_market_reactions (
+                    article_id, ticker, published_at, sentiment_score, primary_event,
+                    price_at_publish, return_1d, return_1w, benchmark_return_1d, abnormal_return_1d
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        article_id,
+                        r.ticker,
+                        r.published_at,
+                        r.sentiment_score,
+                        r.primary_event,
+                        r.price_at_publish,
+                        r.return_1d,
+                        r.return_1w,
+                        r.benchmark_return_1d,
+                        r.abnormal_return_1d,
+                    )
+                    for r in reactions
+                ],
+            )
+        self.conn.commit()
+
+    def upsert_article_embedding(
+        self,
+        article_id: int,
+        *,
+        model: str,
+        vector: list[float],
+        content_hash: str | None = None,
+    ) -> None:
+        from .services.embeddings_service import vector_to_json
+
+        self.conn.execute(
+            """
+            INSERT INTO article_embedding_vectors (article_id, model, dimensions, vector_json, content_hash)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(article_id, model) DO UPDATE SET
+                dimensions = excluded.dimensions,
+                vector_json = excluded.vector_json,
+                content_hash = excluded.content_hash,
+                created_at = CURRENT_TIMESTAMP
+            """,
+            (article_id, model, len(vector), vector_to_json(vector), content_hash),
+        )
+        self.upsert_embedding_metadata(
+            article_id,
+            model=model,
+            content_hash=content_hash,
+            vector_dimensions=len(vector),
+            defer_commit=True,
+        )
+        self.conn.commit()
+
+    def find_embedding_duplicate(
+        self,
+        article_id: int,
+        vector: list[float],
+        *,
+        model: str,
+        threshold: float = 0.92,
+        lookback: int = 500,
+    ) -> tuple[int | None, float | None]:
+        from .services.embeddings_service import cosine_similarity, vector_from_json
+
+        rows = self.conn.execute(
+            """
+            SELECT aev.article_id, aev.vector_json
+            FROM article_embedding_vectors aev
+            JOIN articles a ON a.id = aev.article_id
+            WHERE aev.model = ?
+              AND aev.article_id != ?
+              AND a.duplicate_of_article_id IS NULL
+            ORDER BY aev.article_id DESC
+            LIMIT ?
+            """,
+            (model, article_id, lookback),
+        ).fetchall()
+        best_id = None
+        best_sim = None
+        for row in rows:
+            other = vector_from_json(row["vector_json"])
+            sim = cosine_similarity(vector, other)
+            if sim >= threshold and (best_sim is None or sim > best_sim):
+                best_id = row["article_id"]
+                best_sim = sim
+        return best_id, best_sim
+
+    def get_domain_fetch_state(self, domain: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT domain, last_fetched_at, consecutive_failures, backoff_until FROM domain_fetch_state WHERE domain = ?",
+            (domain.lower(),),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_domain_fetch_state(self, domain: str, *, success: bool) -> int:
+        domain = domain.lower()
+        now = utc_now_iso()
+        row = self.get_domain_fetch_state(domain)
+        failures = (row or {}).get("consecutive_failures") or 0
+        if success:
+            self.conn.execute(
+                """
+                INSERT INTO domain_fetch_state (domain, last_fetched_at, consecutive_failures, backoff_until)
+                VALUES (?, ?, 0, NULL)
+                ON CONFLICT(domain) DO UPDATE SET
+                    last_fetched_at = excluded.last_fetched_at,
+                    consecutive_failures = 0,
+                    backoff_until = NULL
+                """,
+                (domain, now),
+            )
+            self.conn.commit()
+            return 0
+        failures += 1
+        backoff_minutes = min(60, 2 ** min(failures, 6))
+        backoff_until = (datetime.now(timezone.utc) + timedelta(minutes=backoff_minutes)).replace(microsecond=0)
+        backoff_iso = backoff_until.isoformat().replace("+00:00", "Z")
+        self.conn.execute(
+            """
+            INSERT INTO domain_fetch_state (domain, last_fetched_at, consecutive_failures, backoff_until)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(domain) DO UPDATE SET
+                consecutive_failures = excluded.consecutive_failures,
+                backoff_until = excluded.backoff_until
+            """,
+            (domain, (row or {}).get("last_fetched_at"), failures, backoff_iso),
+        )
+        self.conn.commit()
+        return failures
+
+    def event_reaction_analytics(self, *, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                amr.primary_event AS event_type,
+                COUNT(*) AS sample_size,
+                AVG(amr.abnormal_return_1d) AS avg_abnormal_return_1d,
+                AVG(amr.return_1d) AS avg_return_1d
+            FROM article_market_reactions amr
+            WHERE amr.primary_event IS NOT NULL
+              AND amr.abnormal_return_1d IS NOT NULL
+            GROUP BY amr.primary_event
+            ORDER BY ABS(AVG(amr.abnormal_return_1d)) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def fail_job(self, job_id: int, error_message: str, retry_in_minutes: int = 15) -> None:
         row = self.conn.execute("SELECT attempt_count FROM ingestion_jobs WHERE id = ?", (job_id,)).fetchone()

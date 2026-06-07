@@ -1,10 +1,44 @@
 from __future__ import annotations
 
+import logging
+import re
+import threading
 import time
+from collections import deque
 from collections.abc import Iterable
 from urllib.parse import urlparse
 
 import requests
+
+logger = logging.getLogger("stock_tracker.pipeline.sec")
+
+
+class _GlobalSecThrottle:
+    """Process-wide SEC rate limiter: max 8 requests per second (under the 10/s fair-access cap)."""
+
+    _MAX_PER_SECOND = 8
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._timestamps: deque[float] = deque()
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            while self._timestamps and self._timestamps[0] <= now - 1.0:
+                self._timestamps.popleft()
+            if len(self._timestamps) >= self._MAX_PER_SECOND:
+                sleep_until = self._timestamps[0] + 1.0
+                sleep_for = sleep_until - now
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                now = time.monotonic()
+                while self._timestamps and self._timestamps[0] <= now - 1.0:
+                    self._timestamps.popleft()
+            self._timestamps.append(time.monotonic())
+
+
+_global_throttle = _GlobalSecThrottle()
 
 
 class SecClient:
@@ -13,7 +47,6 @@ class SecClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.session = session or requests.Session()
-        self._last_request_at = 0.0
 
     def headers_for(self, url: str) -> dict:
         host = urlparse(url).netloc
@@ -24,11 +57,7 @@ class SecClient:
         }
 
     def _throttle(self) -> None:
-        now = time.monotonic()
-        wait_for = 0.6 - (now - self._last_request_at)
-        if wait_for > 0:
-            time.sleep(wait_for)
-        self._last_request_at = time.monotonic()
+        _global_throttle.wait()
 
     def get_json(self, url: str) -> dict:
         self._throttle()
@@ -79,4 +108,5 @@ class SecClient:
     def form4_document_url(self, cik: str, accession: str, primary_document: str) -> str:
         cik_numeric = str(int(cik))
         accession_path = accession.replace("-", "")
-        return f"https://www.sec.gov/Archives/edgar/data/{cik_numeric}/{accession_path}/{primary_document}"
+        raw_doc = re.sub(r"^xslF345X\d+/", "", primary_document)
+        return f"https://www.sec.gov/Archives/edgar/data/{cik_numeric}/{accession_path}/{raw_doc}"

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+import time
 from datetime import datetime, timedelta
 
 from ..clients.stooq import StooqClient
 from ..repositories import Repository
+
+logger = logging.getLogger("stock_tracker.pipeline.prices")
 
 try:
     import yfinance as yf  # type: ignore
@@ -17,13 +21,21 @@ class PricesService:
         self.stooq = stooq or StooqClient()
 
     def refresh_prices(self, tickers: list[str], days: int = 400) -> dict:
+        logger.info("refresh_prices start tickers=%d days=%d", len(tickers), days)
+        t0 = time.monotonic()
         refreshed = []
         records_written = 0
         for ticker in [item.upper() for item in tickers if item]:
             rows = self._fetch_ticker_prices(ticker, days=days)
             if rows:
-                records_written += self.repo.upsert_prices(ticker, rows, source=rows[0].get("source", "stooq"))
+                source = rows[0].get("source", "stooq")
+                records_written += self.repo.upsert_prices(ticker, rows, source=source)
+                logger.debug("refresh_prices ticker=%s rows=%d source=%s", ticker, len(rows), source)
                 refreshed.append(ticker)
+            else:
+                logger.debug("refresh_prices ticker=%s no data", ticker)
+        elapsed = time.monotonic() - t0
+        logger.info("refresh_prices done tickers=%d records=%d elapsed=%.1fs", len(refreshed), records_written, elapsed)
         return {"tickers": refreshed, "recordsWritten": records_written}
 
     def _fetch_ticker_prices(self, ticker: str, days: int) -> list[dict]:
@@ -33,8 +45,8 @@ class PricesService:
                 for row in rows:
                     row["source"] = "stooq"
                 return rows
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("stooq fetch failed ticker=%s: %s", ticker, exc)
         if yf is None:
             return []
         try:
@@ -74,11 +86,12 @@ class PricesService:
         ]
 
     def get_quotes(self, tickers: list[str]) -> dict:
+        batch = self.repo.fetch_prices_batch(tickers, limit_per_ticker=2)
         quotes = {}
         for ticker in tickers:
-            latest_two = self.repo.fetch_prices(ticker.upper(), limit=2)
-            latest = latest_two[0] if latest_two else {}
-            previous = latest_two[1] if len(latest_two) > 1 else {}
+            rows = batch.get(ticker.upper(), [])
+            latest = rows[0] if rows else {}
+            previous = rows[1] if len(rows) > 1 else {}
             quotes[ticker.upper()] = {
                 "last": latest.get("close"),
                 "prevClose": previous.get("close"),
@@ -90,11 +103,12 @@ class PricesService:
         return quotes
 
     def get_daily_changes(self, tickers: list[str]) -> dict:
+        batch = self.repo.fetch_prices_batch(tickers, limit_per_ticker=2)
         changes = {}
         for ticker in tickers:
-            latest_two = self.repo.fetch_prices(ticker.upper(), limit=2)
-            today_close = latest_two[0]["close"] if latest_two else None
-            prev_close = latest_two[1]["close"] if len(latest_two) > 1 else None
+            rows = batch.get(ticker.upper(), [])
+            today_close = rows[0]["close"] if rows else None
+            prev_close = rows[1]["close"] if len(rows) > 1 else None
             changes[ticker.upper()] = {"prevClose": prev_close, "todayClose": today_close}
         return changes
 
@@ -112,10 +126,11 @@ class PricesService:
             "change16w": 80,
             "change6m": 126,
         }
+        batch = self.repo.fetch_prices_batch(tickers, limit_per_ticker=260)
         stats: dict[str, dict] = {}
         for ticker in tickers:
             symbol = ticker.upper()
-            rows = self.repo.fetch_prices(symbol, limit=260)
+            rows = batch.get(symbol, [])
             if not rows:
                 stats[symbol] = {}
                 continue
@@ -142,9 +157,10 @@ class PricesService:
         """Daily or weekly movers exceeding threshold % from cached prices."""
         offset = 1 if window == "d" else 5
         candidates = self.repo.fetch_tickers_with_recent_prices(limit=500)
+        batch = self.repo.fetch_prices_batch(candidates, limit_per_ticker=offset + 2)
         movers: list[dict] = []
         for ticker in candidates:
-            rows = self.repo.fetch_prices(ticker, limit=offset + 2)
+            rows = batch.get(ticker, [])
             if len(rows) <= offset:
                 continue
             latest = rows[0].get("close")

@@ -7,7 +7,7 @@ from typing import Callable
 from ..repositories import Repository
 from .handlers import JobContext, build_handlers
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("stock_tracker.pipeline.worker")
 
 
 class WorkerRunner:
@@ -22,14 +22,21 @@ class WorkerRunner:
             return False
         handler = self.handlers.get(job["job_type"])
         if handler is None:
+            logger.warning("Unknown job type=%s id=%s", job["job_type"], job["id"])
             self.ctx.repo.fail_job(job["id"], f"Unknown job type: {job['job_type']}")
             return True
+        logger.info("Job start id=%s type=%s payload_keys=%s",
+                    job["id"], job["job_type"], list((job.get("payload") or {}).keys()))
+        t0 = time.monotonic()
         try:
             result = handler(job["payload"])
+            elapsed = time.monotonic() - t0
             self.ctx.repo.complete_job(job["id"], status="done")
-            logger.info("Job %s (%s) completed: %s", job["id"], job["job_type"], result)
+            logger.info("Job done id=%s type=%s elapsed=%.1fs result_keys=%s",
+                       job["id"], job["job_type"], elapsed, list((result or {}).keys()))
         except Exception as exc:
-            logger.exception("Job %s (%s) failed", job["id"], job["job_type"])
+            elapsed = time.monotonic() - t0
+            logger.exception("Job failed id=%s type=%s elapsed=%.1fs", job["id"], job["job_type"], elapsed)
             self.ctx.repo.fail_job(job["id"], str(exc))
             self._emit_fetch_failed(job, exc)
         return True

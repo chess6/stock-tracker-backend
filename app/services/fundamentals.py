@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
+import time
 from collections import defaultdict
 
 from ..repositories import Repository
 from .company_enrichment import metadata_from_submissions
 from .sec import normalize_company_facts
+
+logger = logging.getLogger("stock_tracker.pipeline.fundamentals")
 
 
 RAW_COLUMNS = [
@@ -24,17 +28,27 @@ RAW_COLUMNS = [
     {"name": "ebit", "type": "double"},
     {"name": "ebitda", "type": "double"},
     {"name": "netinc", "type": "double"},
+    {"name": "compinc", "type": "double"},
     {"name": "eps", "type": "double"},
     {"name": "taxexp", "type": "double"},
+    {"name": "interestexp", "type": "double"},
+    {"name": "depamor", "type": "double"},
     {"name": "assets", "type": "double"},
+    {"name": "assetscurrent", "type": "double"},
     {"name": "liabilities", "type": "double"},
+    {"name": "liabilitiescurrent", "type": "double"},
     {"name": "equity", "type": "double"},
     {"name": "cashneq", "type": "double"},
     {"name": "debt", "type": "double"},
+    {"name": "debtlt", "type": "double"},
+    {"name": "debtcurrent", "type": "double"},
     {"name": "ppnenet", "type": "double"},
     {"name": "inventory", "type": "double"},
     {"name": "receivables", "type": "double"},
     {"name": "payables", "type": "double"},
+    {"name": "retearn", "type": "double"},
+    {"name": "goodwill", "type": "double"},
+    {"name": "intangibles", "type": "double"},
     {"name": "workingcapital", "type": "double"},
     {"name": "ncfo", "type": "double"},
     {"name": "capex", "type": "double"},
@@ -43,6 +57,8 @@ RAW_COLUMNS = [
     {"name": "ncff", "type": "double"},
     {"name": "ncfdiv", "type": "double"},
     {"name": "ncfdebt", "type": "double"},
+    {"name": "ncfcommon", "type": "double"},
+    {"name": "sbcomp", "type": "double"},
     {"name": "ncf", "type": "double"},
     {"name": "sharesbas", "type": "double"},
 ]
@@ -50,9 +66,12 @@ RAW_COLUMNS = [
 STATEMENT_METRICS = frozenset(
     {
         "revenue", "cor", "gp", "opex", "sgna", "rnd", "opinc", "ebit", "ebitda",
-        "netinc", "eps", "taxexp", "assets", "liabilities", "equity", "cashneq", "debt",
-        "ppnenet", "inventory", "receivables", "payables", "workingcapital",
-        "ncfo", "capex", "fcf", "ncfi", "ncff", "ncfdiv", "ncfdebt", "ncf",
+        "netinc", "compinc", "eps", "taxexp", "interestexp", "depamor",
+        "assets", "assetscurrent", "liabilities", "liabilitiescurrent", "equity",
+        "cashneq", "debt", "debtlt", "debtcurrent", "ppnenet", "inventory",
+        "receivables", "payables", "retearn", "goodwill", "intangibles",
+        "workingcapital", "ncfo", "capex", "fcf", "ncfi", "ncff", "ncfdiv",
+        "ncfdebt", "ncfcommon", "sbcomp", "ncf",
     }
 )
 
@@ -141,6 +160,16 @@ def pivot_fundamentals_rows(rows: list[dict]) -> list[dict]:
         )
         wide_row["sharesbas"] = row["value"]
 
+    latest_shares_by_ticker_dimension: dict[tuple[str, str], tuple[str, float]] = {}
+    for row in shares_rows:
+        if not row.get("value"):
+            continue
+        bucket_key = (row["ticker"], row["dimension"])
+        candidate = (row.get("period_end") or "", row["value"])
+        existing = latest_shares_by_ticker_dimension.get(bucket_key)
+        if existing is None or candidate[0] > existing[0]:
+            latest_shares_by_ticker_dimension[bucket_key] = candidate
+
     wide_rows = []
     for wide_row in grouped.values():
         assets = wide_row.get("assets")
@@ -153,6 +182,12 @@ def pivot_fundamentals_rows(rows: list[dict]) -> list[dict]:
             wide_row["gp"] = revenue - cor
         if wide_row.get("ebit") is None and wide_row.get("opinc") is not None:
             wide_row["ebit"] = wide_row["opinc"]
+        if wide_row.get("sharesbas") is None:
+            fallback = latest_shares_by_ticker_dimension.get(
+                (wide_row["ticker"], wide_row["dimension"])
+            )
+            if fallback is not None:
+                wide_row["sharesbas"] = fallback[1]
         wide_row.pop("_fiscal_year", None)
         wide_row.pop("_fiscal_quarter", None)
         wide_rows.append(wide_row)
@@ -162,6 +197,48 @@ def pivot_fundamentals_rows(rows: list[dict]) -> list[dict]:
         key=lambda item: (item["ticker"], item["calendardate"], item["dimension"]),
         reverse=True,
     )
+
+
+BALANCE_SHEET_METRICS = frozenset(
+    {
+        "assets", "assetscurrent", "liabilities", "liabilitiescurrent", "equity",
+        "cashneq", "debt", "debtlt", "debtcurrent", "ppnenet", "inventory",
+        "receivables", "payables", "retearn", "goodwill", "intangibles",
+        "workingcapital", "sharesbas",
+    }
+)
+
+
+def compute_ttm_rows(wide_rows: list[dict]) -> list[dict]:
+    quarterly_by_ticker: dict[str, list[dict]] = defaultdict(list)
+    for row in wide_rows:
+        if row.get("periodtype") == "quarterly":
+            quarterly_by_ticker[row["ticker"]].append(row)
+
+    ttm_rows = []
+    for ticker, quarters in quarterly_by_ticker.items():
+        sorted_q = sorted(quarters, key=lambda r: r["calendardate"], reverse=True)[:4]
+        if len(sorted_q) < 4:
+            continue
+        latest = sorted_q[0]
+        ttm_row = {
+            "ticker": latest["ticker"],
+            "company_name": latest.get("company_name"),
+            "calendardate": latest["calendardate"],
+            "dimension": "TTM",
+            "filingdate": latest.get("filingdate"),
+            "periodtype": "ttm",
+        }
+        metric_names = {col["name"] for col in RAW_COLUMNS if col["type"] == "double"}
+        for metric in metric_names:
+            if metric in BALANCE_SHEET_METRICS:
+                ttm_row[metric] = latest.get(metric)
+            else:
+                values = [q.get(metric) for q in sorted_q]
+                if all(v is not None for v in values):
+                    ttm_row[metric] = sum(values)
+        ttm_rows.append(ttm_row)
+    return ttm_rows
 
 
 def build_company_metrics(row: dict, price: float | None = None) -> dict:
@@ -300,20 +377,28 @@ class FundamentalsService:
         self.sec_client = sec_client
 
     def refresh_company_tickers(self, url: str) -> dict:
+        logger.info("refresh_company_tickers start")
+        t0 = time.monotonic()
         companies = self.sec_client.fetch_company_tickers(url)
         count = self.repo.upsert_companies(companies)
+        logger.info("refresh_company_tickers done companies=%d elapsed=%.1fs", count, time.monotonic() - t0)
         return {"inserted": count}
 
     def refresh_fundamentals(self, tickers: list[str]) -> dict:
+        logger.info("refresh_fundamentals start tickers=%d", len(tickers))
+        t0 = time.monotonic()
         inserted = 0
         refreshed = []
         for ticker in [ticker.upper() for ticker in tickers if ticker]:
             company = self.repo.get_company_by_ticker(ticker)
             if not company or not company.get("cik"):
+                logger.debug("refresh_fundamentals skip ticker=%s (no CIK)", ticker)
                 continue
             payload = self.sec_client.fetch_company_facts(company["cik"])
             records = normalize_company_facts(company["id"], payload)
-            inserted += self.repo.upsert_fundamentals(records)
+            count = self.repo.upsert_fundamentals(records)
+            inserted += count
+            logger.debug("refresh_fundamentals ticker=%s records=%d", ticker, count)
             try:
                 submissions = self.sec_client.fetch_submissions(company["cik"])
                 meta = metadata_from_submissions(submissions)
@@ -321,11 +406,43 @@ class FundamentalsService:
             except Exception:
                 pass
             refreshed.append(ticker)
+        elapsed = time.monotonic() - t0
+        logger.info("refresh_fundamentals done tickers=%d records=%d elapsed=%.1fs",
+                    len(refreshed), inserted, elapsed)
         return {"tickers": refreshed, "recordsWritten": inserted}
+
+    def enrich_company_metadata(self, tickers: list[str]) -> dict:
+        logger.info("enrich_company_metadata start tickers=%d", len(tickers))
+        t0 = time.monotonic()
+        enriched = []
+        for ticker in [t.upper() for t in tickers if t]:
+            company = self.repo.get_company_by_ticker(ticker)
+            if not company or not company.get("cik"):
+                logger.debug("enrich_company_metadata skip ticker=%s (no CIK)", ticker)
+                continue
+            try:
+                submissions = self.sec_client.fetch_submissions(company["cik"])
+            except Exception:
+                logger.debug("enrich_company_metadata fetch failed ticker=%s", ticker)
+                continue
+            meta = metadata_from_submissions(submissions)
+            self.repo.update_company_metadata(ticker, meta)
+            enriched.append(ticker)
+        elapsed = time.monotonic() - t0
+        logger.info("enrich_company_metadata done enriched=%d elapsed=%.1fs", len(enriched), elapsed)
+        return {"enriched": len(enriched), "tickers": enriched}
 
     def get_financials_payload(self, tickers: list[str], gte: str | None, dimension: str | None, most_recent: bool) -> dict:
         rows = self.repo.fetch_fundamentals_rows(tickers, gte=gte, dimension=dimension)
         wide_rows = pivot_fundamentals_rows(rows)
+
+        if dimension == "TTM" or (not dimension and not most_recent):
+            ttm_rows = compute_ttm_rows(wide_rows)
+            if dimension == "TTM":
+                wide_rows = ttm_rows
+            else:
+                wide_rows = ttm_rows + wide_rows
+
         if most_recent:
             candidates = wide_rows
             if not dimension:
