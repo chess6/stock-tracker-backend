@@ -239,6 +239,35 @@ def build_company_metrics(row: dict, price: float | None = None) -> dict:
         rev_debt = revenue / debt
     if market_cap is not None and enterprise_value:
         mc_ev = market_cap / enterprise_value
+    pe = None
+    if eps not in (None, 0) and price is not None:
+        pe = price / eps
+    roe = None
+    if netinc is not None and equity not in (None, 0):
+        roe = netinc / equity
+    roa = None
+    if netinc is not None and assets not in (None, 0):
+        roa = netinc / assets
+    gp = row.get("gp")
+    gross_margin = None
+    if gp is not None and revenue not in (None, 0):
+        gross_margin = gp / revenue
+    net_margin = None
+    if netinc is not None and revenue not in (None, 0):
+        net_margin = netinc / revenue
+    de = None
+    if debt is not None and equity not in (None, 0):
+        de = debt / equity
+    current_ratio = None
+    assets_current = row.get("assetscurrent")
+    liabilities_current = row.get("liabilitiescurrent")
+    if assets_current is not None and liabilities_current not in (None, 0):
+        current_ratio = assets_current / liabilities_current
+    div_yield = None
+    ncfdiv = row.get("ncfdiv")
+    if ncfdiv is not None and shares not in (None, 0) and price not in (None, 0):
+        dps = abs(ncfdiv) / shares
+        div_yield = dps / price
     return {
         "marketCap": market_cap,
         "revenue": revenue,
@@ -254,6 +283,14 @@ def build_company_metrics(row: dict, price: float | None = None) -> dict:
         "assetp": asset_per_share,
         "revDebt": rev_debt,
         "mcEv": mc_ev,
+        "pe": pe,
+        "roe": roe,
+        "roa": roa,
+        "grossMargin": gross_margin,
+        "netMargin": net_margin,
+        "de": de,
+        "currentRatio": current_ratio,
+        "divYield": div_yield,
     }
 
 

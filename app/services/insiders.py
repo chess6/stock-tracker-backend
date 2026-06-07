@@ -111,9 +111,10 @@ def parse_form4_xml(xml_text: str, filing_date: str, accession: str) -> list[dic
         price = _float(_text(node, ".//{*}transactionAmounts/{*}transactionPricePerShare/{*}value"))
         transaction_date = _text(node, ".//{*}transactionDate/{*}value")
         value = shares * price if shares is not None and price is not None else None
-        ad_code = "NA"
-        if code == "S":
+        if code in ("S", "D", "F"):
             ad_code = "ND"
+        else:
+            ad_code = "NA"
         transactions.append(
             {
                 "filing_date": filing_date,
