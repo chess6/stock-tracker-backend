@@ -3,8 +3,9 @@
 .orchestrator.pid
 .orchestrator_api.pid
 *.out
+backend.out
 .env
-data/*.sqlite3
+data/
 logs/
 __pycache__/
 .pytest_cache/
