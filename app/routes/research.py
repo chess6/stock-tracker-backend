@@ -29,7 +29,9 @@ def research_screener():
 
 @research_bp.route("/ticker/<ticker>", methods=["GET"])
 def research_ticker(ticker: str):
-    payload = get_research_service().get_ticker_detail(ticker)
+    dimension = request.args.get("dimension", "MRY")
+    gte = request.args.get("gte") or None
+    payload = get_research_service().get_ticker_detail(ticker, dimension=dimension, gte=gte)
     if payload.get("error") == "not_found":
         return jsonify(payload), 404
     return jsonify(payload)

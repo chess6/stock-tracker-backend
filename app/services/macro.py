@@ -85,71 +85,79 @@ class MacroSnapshotService:
         return svc.refresh_prices(MACRO_TICKERS)
 
     def snapshot(self) -> dict:
+        items_by_id: dict[str, dict] = {}
+        sqlite_hits = 0
+
         if self.repo is not None:
-            cached = self._from_sqlite()
-            if cached is not None:
-                return cached
+            price_batch = self.repo.fetch_prices_batch(MACRO_TICKERS, limit_per_ticker=2)
+            for entry in MACRO_SYMBOLS:
+                item = self._item_from_sqlite(entry, price_batch)
+                if item.get("available"):
+                    items_by_id[entry["id"]] = item
+                    sqlite_hits += 1
 
-        if yf is None:
-            return {
-                "items": [_empty_item(entry) for entry in MACRO_SYMBOLS],
-                "meta": {"source": "disabled", "reason": "yfinance unavailable", "unavailable": len(MACRO_SYMBOLS)},
-            }
+        missing = [entry for entry in MACRO_SYMBOLS if entry["id"] not in items_by_id]
+        yfinance_hits = 0
+        if missing and yf is not None:
+            symbols = [entry["symbol"] for entry in missing]
+            batch = self._batch_history(symbols)
+            for entry in missing:
+                item = self._quote_from_batch(entry, batch, len(symbols)) or self._quote_single(entry)
+                if item and item.get("available"):
+                    items_by_id[entry["id"]] = item
+                    yfinance_hits += 1
 
-        batch = self._batch_history()
         items = []
         unavailable = 0
         for entry in MACRO_SYMBOLS:
-            item = self._quote_from_batch(entry, batch) or self._quote_single(entry)
-            if not item:
-                item = _empty_item(entry)
-                unavailable += 1
-            elif not item.get("available"):
+            item = items_by_id.get(entry["id"]) or _empty_item(entry)
+            if not item.get("available"):
                 unavailable += 1
             items.append(item)
+
+        if sqlite_hits == len(MACRO_SYMBOLS):
+            source = "sqlite"
+        elif sqlite_hits and yfinance_hits:
+            source = "sqlite+yfinance"
+        elif sqlite_hits:
+            source = "sqlite"
+        elif yfinance_hits:
+            source = "yfinance"
+        elif yf is None:
+            source = "disabled"
+        else:
+            source = "unavailable"
 
         return {
             "items": items,
             "meta": {
-                "source": "yfinance",
+                "source": source,
                 "total": len(items),
                 "unavailable": unavailable,
+                "sqliteHits": sqlite_hits,
+                "yfinanceHits": yfinance_hits,
             },
         }
 
-    def _from_sqlite(self) -> dict | None:
-        """Try to serve macro snapshot entirely from cached prices table."""
-        batch = self.repo.fetch_prices_batch(MACRO_TICKERS, limit_per_ticker=2)
-        items = []
-        unavailable = 0
-        any_available = False
-        for entry in MACRO_SYMBOLS:
-            symbol = entry["symbol"]
-            if symbol.startswith("^"):
-                items.append(_empty_item(entry))
-                unavailable += 1
-                continue
-            rows = batch.get(symbol.upper(), [])
-            if len(rows) >= 2 and rows[0].get("close") is not None and rows[1].get("close") is not None:
-                items.append(_item_from_closes(entry, rows[0]["close"], rows[1]["close"]))
-                any_available = True
-            elif rows and rows[0].get("close") is not None:
-                item = _item_from_closes(entry, rows[0]["close"], rows[0]["close"])
-                item["changePct"] = None
-                items.append(item)
-                any_available = True
-            else:
-                items.append(_empty_item(entry))
-                unavailable += 1
-        if not any_available:
-            return None
-        return {
-            "items": items,
-            "meta": {"source": "sqlite", "total": len(items), "unavailable": unavailable},
-        }
+    def _item_from_sqlite(self, entry: dict, batch: dict) -> dict:
+        symbol = entry["symbol"]
+        if symbol.startswith("^"):
+            return _empty_item(entry)
+        rows = batch.get(symbol.upper(), [])
+        if len(rows) >= 2 and rows[0].get("close") is not None and rows[1].get("close") is not None:
+            return _item_from_closes(entry, rows[0]["close"], rows[1]["close"])
+        if rows and rows[0].get("close") is not None:
+            item = _item_from_closes(entry, rows[0]["close"], rows[0]["close"])
+            item["changePct"] = None
+            return item
+        return _empty_item(entry)
 
-    def _batch_history(self):
-        symbols = [entry["symbol"] for entry in MACRO_SYMBOLS]
+    def _batch_history(self, symbols: list[str] | None = None):
+        if yf is None:
+            return None
+        symbols = symbols or [entry["symbol"] for entry in MACRO_SYMBOLS]
+        if not symbols:
+            return None
         try:
             return yf.download(
                 symbols,
@@ -160,12 +168,14 @@ class MacroSnapshotService:
                 progress=False,
             )
         except Exception:
+            logger.exception("macro batch yfinance download failed symbols=%d", len(symbols))
             return None
 
-    def _history_frame(self, batch, symbol: str):
+    def _history_frame(self, batch, symbol: str, symbol_count: int | None = None):
         if batch is None or getattr(batch, "empty", True):
             return None
-        if len(MACRO_SYMBOLS) == 1:
+        count = symbol_count if symbol_count is not None else len(MACRO_SYMBOLS)
+        if count == 1:
             return batch
         try:
             if symbol in batch.columns.get_level_values(0):
@@ -177,8 +187,8 @@ class MacroSnapshotService:
             return batch
         return None
 
-    def _quote_from_batch(self, entry: dict, batch) -> dict | None:
-        frame = self._history_frame(batch, entry["symbol"])
+    def _quote_from_batch(self, entry: dict, batch, symbol_count: int | None = None) -> dict | None:
+        frame = self._history_frame(batch, entry["symbol"], symbol_count=symbol_count)
         if frame is None or frame.empty or len(frame) < 2:
             return None
         if "Close" not in frame.columns:

@@ -3,7 +3,14 @@ from __future__ import annotations
 import logging
 
 from ..repositories import Repository
-from .fundamentals import RAW_COLUMNS, build_company_metrics, pivot_fundamentals_rows, resolve_financial_dimension
+from .fundamentals import (
+    RAW_COLUMNS,
+    build_company_metrics,
+    collapse_narrow_fundamentals_rows,
+    compute_ttm_rows,
+    pivot_fundamentals_rows,
+    resolve_financial_dimension,
+)
 from .prices import PricesService
 from .scoring import margin_trend_delta, share_dilution_rate, _gross_margin, _operating_margin
 
@@ -99,20 +106,50 @@ class ResearchService:
 
         return {"tickers": [t.upper() for t in tickers], "results": results}
 
-    def get_ticker_detail(self, ticker: str) -> dict:
+    def get_ticker_detail(
+        self,
+        ticker: str,
+        dimension: str | None = None,
+        gte: str | None = None,
+    ) -> dict:
         symbol = ticker.upper()
         company = self.repo.get_company_by_ticker(symbol)
         if not company:
             return {"ticker": symbol, "error": "not_found"}
 
-        annual_rows = pivot_fundamentals_rows(
-            self.repo.fetch_fundamentals_rows([symbol], dimension="ARY")
-        )
-        quarterly_rows = pivot_fundamentals_rows(
-            self.repo.fetch_fundamentals_rows([symbol], dimension="ARQ")
-        )
+        resolved = resolve_financial_dimension(dimension or "MRY", most_recent=False)
+        storage_dimension = resolved["storage_dimension"]
+        ttm_only = bool(resolved["ttm_only"])
+        include_ttm = bool(resolved["include_ttm"])
+        dimension_code = (dimension or "MRY").upper()
+        collapse_annual = dimension_code in {"MRY", "ARY"}
+        collapse_quarterly = dimension_code in {"MRQ", "ARQ"}
+
+        def load_wide_rows(tickers: list[str], *, storage_dim: str | None, annual: bool | None) -> list[dict]:
+            narrow_rows = self.repo.fetch_fundamentals_rows(tickers, gte=gte, dimension=storage_dim)
+            if annual is True:
+                narrow_rows = collapse_narrow_fundamentals_rows(narrow_rows, annual=True)
+            elif annual is False:
+                narrow_rows = collapse_narrow_fundamentals_rows(narrow_rows, annual=False)
+            return pivot_fundamentals_rows(narrow_rows)
+
+        if ttm_only or include_ttm:
+            quarterly_rows = load_wide_rows([symbol], storage_dim="ARQ", annual=False)
+            ttm_rows = compute_ttm_rows(quarterly_rows)
+            all_rows = ttm_rows if ttm_only else ttm_rows + quarterly_rows
+        elif isinstance(storage_dimension, str):
+            all_rows = load_wide_rows(
+                [symbol],
+                storage_dim=storage_dimension,
+                annual=True if collapse_annual else False if collapse_quarterly else None,
+            )
+        else:
+            all_rows = load_wide_rows([symbol], storage_dim="ARY", annual=True) + load_wide_rows(
+                [symbol], storage_dim="ARQ", annual=False
+            )
+
         all_rows = sorted(
-            annual_rows + quarterly_rows,
+            all_rows,
             key=lambda r: (r.get("calendardate") or "", r.get("dimension") or ""),
             reverse=True,
         )
@@ -145,6 +182,7 @@ class ResearchService:
         return {
             "ticker": symbol,
             "company": company,
+            "dimension": (dimension or "MRY").upper(),
             "periods": periods,
             "scoreHistory": score_history,
             "insiders": insiders,

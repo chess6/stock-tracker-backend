@@ -90,6 +90,46 @@ def _dedupe_narrow_rows(rows: list[dict]) -> list[dict]:
     return list(latest.values())
 
 
+def collapse_narrow_fundamentals_rows(rows: list[dict], *, annual: bool) -> list[dict]:
+    """Keep one snapshot per fiscal period/metric for history charts."""
+    deduped = _dedupe_narrow_rows(rows)
+    buckets: dict[tuple, dict] = {}
+    for row in deduped:
+        if annual:
+            cal_year = (row.get("period_end") or "")[:4]
+            key = (
+                (row["ticker"], row["dimension"], cal_year, row["metric"])
+                if cal_year
+                else (row["ticker"], row["dimension"], row["period_end"], row["metric"])
+            )
+        else:
+            fy = row.get("fiscal_year")
+            fq = row.get("fiscal_quarter")
+            key = (
+                (row["ticker"], row["dimension"], fy, fq, row["metric"])
+                if fy is not None and fq
+                else (row["ticker"], row["dimension"], row["period_end"], row["metric"])
+            )
+
+        current = buckets.get(key)
+        if current is None:
+            buckets[key] = row
+            continue
+        if annual:
+            row_rank = (abs(row.get("value") or 0), row.get("period_end") or "")
+            current_rank = (abs(current.get("value") or 0), current.get("period_end") or "")
+            if row_rank > current_rank:
+                buckets[key] = row
+            continue
+        row_date = row.get("period_end") or ""
+        current_date = current.get("period_end") or ""
+        if row_date > current_date:
+            buckets[key] = row
+        elif row_date == current_date and (row.get("filing_date") or "") > (current.get("filing_date") or ""):
+            buckets[key] = row
+    return list(buckets.values())
+
+
 def pivot_fundamentals_rows(rows: list[dict]) -> list[dict]:
     """Pivot narrow fundamentals into SHARADAR-style wide rows.
 
@@ -192,15 +232,17 @@ def pivot_fundamentals_rows(rows: list[dict]) -> list[dict]:
             )
             if fallback is not None:
                 wide_row["sharesbas"] = fallback[1]
-        wide_row.pop("_fiscal_year", None)
-        wide_row.pop("_fiscal_quarter", None)
         wide_rows.append(wide_row)
 
-    return sorted(
+    wide_rows = sorted(
         wide_rows,
         key=lambda item: (item["ticker"], item["calendardate"], item["dimension"]),
         reverse=True,
     )
+    for wide_row in wide_rows:
+        wide_row.pop("_fiscal_year", None)
+        wide_row.pop("_fiscal_quarter", None)
+    return wide_rows
 
 
 def resolve_financial_dimension(

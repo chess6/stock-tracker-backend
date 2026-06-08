@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from app.services.fundamentals import pivot_fundamentals_rows, resolve_financial_dimension
+from app.services.fundamentals import (
+    collapse_narrow_fundamentals_rows,
+    pivot_fundamentals_rows,
+    resolve_financial_dimension,
+)
 from app.services.sec import normalize_company_facts
 
 
@@ -353,3 +357,37 @@ def test_pivot_fundamentals_rows_aligns_shares_to_statement_period():
     assert latest["netinc"] == 112_000_000_000
     assert latest["sharesbas"] == 14_776_353_000
     assert "2025-10-17" not in by_date
+
+
+def test_collapse_narrow_annual_prefers_full_year_revenue_snapshot():
+    rows = [
+        {
+            "ticker": "AAPL",
+            "company_name": "Apple Inc.",
+            "metric": "revenue",
+            "value": 42_000_000_000,
+            "period_end": "2016-06-25",
+            "period_type": "annual",
+            "dimension": "ARY",
+            "fiscal_year": 2016,
+            "fiscal_quarter": "Q3",
+            "filing_date": "2016-10-26",
+        },
+        {
+            "ticker": "AAPL",
+            "company_name": "Apple Inc.",
+            "metric": "revenue",
+            "value": 215_000_000_000,
+            "period_end": "2016-09-24",
+            "period_type": "annual",
+            "dimension": "ARY",
+            "fiscal_year": 2016,
+            "fiscal_quarter": "FY",
+            "filing_date": "2016-10-26",
+        },
+    ]
+
+    collapsed = collapse_narrow_fundamentals_rows(rows, annual=True)
+    assert len(collapsed) == 1
+    assert collapsed[0]["period_end"] == "2016-09-24"
+    assert collapsed[0]["value"] == 215_000_000_000
