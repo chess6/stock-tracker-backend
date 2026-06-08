@@ -3,3 +3,5 @@
 transformers>=4.36
 torch
 sentence-transformers>=2.2
+newspaper3k>=0.2.8
+lxml_html_clean>=0.4.0

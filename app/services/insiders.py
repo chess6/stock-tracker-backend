@@ -6,8 +6,11 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
+import requests
+
 from ..clients.sec import SecClient
 from ..repositories import Repository
+from .sec_eligibility import should_skip_sec_fundamentals
 
 logger = logging.getLogger("stock_tracker.pipeline.insiders")
 
@@ -36,6 +39,8 @@ class InsidersService:
         logger.info("refresh_insiders start tickers=%d max_filings=%d", len(tickers), filing_limit)
         t0 = time.monotonic()
         refreshed = []
+        skipped: list[dict] = []
+        errors: list[dict] = []
         records_written = 0
         total_sec_requests = 0
         for ticker in [item.upper() for item in tickers if item]:
@@ -48,12 +53,22 @@ class InsidersService:
             company = self.repo.get_company_by_ticker(ticker)
             if not company or not company.get("cik"):
                 logger.debug("refresh_insiders skip ticker=%s (no CIK)", ticker)
+                skipped.append({"ticker": ticker, "reason": "no_cik"})
                 continue
-            transactions, requests_made = self._fetch_form4_transactions(
-                company["cik"],
-                filing_limit=filing_limit,
-                remaining_budget=self.max_total_requests - total_sec_requests,
-            )
+            if should_skip_sec_fundamentals(company):
+                logger.debug("refresh_insiders skip ticker=%s (non-operating issuer)", ticker)
+                skipped.append({"ticker": ticker, "reason": "non_operating_issuer"})
+                continue
+            try:
+                transactions, requests_made = self._fetch_form4_transactions(
+                    company["cik"],
+                    filing_limit=filing_limit,
+                    remaining_budget=self.max_total_requests - total_sec_requests,
+                )
+            except requests.RequestException as exc:
+                logger.warning("refresh_insiders ticker=%s request failed: %s", ticker, exc)
+                errors.append({"ticker": ticker, "reason": "sec_request_error", "message": str(exc)})
+                continue
             total_sec_requests += requests_made
             if transactions:
                 records_written += self.repo.upsert_insider_transactions(company["id"], transactions)
@@ -67,7 +82,12 @@ class InsidersService:
         elapsed = time.monotonic() - t0
         logger.info("refresh_insiders done tickers=%d records=%d requests=%d elapsed=%.1fs",
                     len(refreshed), records_written, total_sec_requests, elapsed)
-        return {"tickers": refreshed, "recordsWritten": records_written}
+        return {
+            "tickers": refreshed,
+            "recordsWritten": records_written,
+            "skipped": skipped,
+            "errors": errors,
+        }
 
     def _fetch_form4_transactions(
         self, cik: str, *, filing_limit: int | None = None, remaining_budget: int | None = None,

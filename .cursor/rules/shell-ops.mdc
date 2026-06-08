@@ -16,7 +16,7 @@ set -euo pipefail
 
 | Script | Purpose |
 |--------|---------|
-| `start.sh` / `stop.sh` | Flask API (`FLASK_DEBUG=0`, port 5000) |
+| `start.sh` / `stop.sh` | Flask API via Gunicorn (`gunicorn.conf.py`, port 5000) |
 | `worker.sh` / `stop_worker.sh` | Background ETL worker |
 | `bootstrap.sh` | POST `/api/admin/bootstrap` — exit 1 on HTTP 4xx/5xx |
 | `refresh_data.sh` | Fundamentals + prices + insiders + feeds |

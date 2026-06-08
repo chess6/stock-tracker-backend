@@ -18,8 +18,7 @@ if [[ -f "$PID_FILE" ]]; then
 fi
 
 cd "$SCRIPT_DIR"
-# Disable the Flask debug reloader so the background PID stays valid.
-FLASK_DEBUG=0 nohup python3 api.py >"$LOG_FILE" 2>&1 &
+nohup gunicorn --config gunicorn.conf.py wsgi:app >"$LOG_FILE" 2>&1 &
 BACKEND_PID=$!
 echo "$BACKEND_PID" >"$PID_FILE"
 sleep 1

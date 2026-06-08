@@ -131,6 +131,8 @@ def test_news_feed_returns_unique_articles(app, client):
     assert len(payload["articles"]) == 1
     assert payload["articles"][0]["title"] == "Apple launches product"
     assert payload["articles"][0]["tickers"] == ["AAPL"]
+    assert payload["articles"][0]["tickerMatches"][0]["matchStrategy"] == "headline_ticker"
+    assert payload["articles"][0]["tickerMatches"][0]["confidence"] == 0.96
 
 
 def test_preferences_round_trip(app, client):

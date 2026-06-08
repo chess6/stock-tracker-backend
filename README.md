@@ -15,6 +15,18 @@ Local-data-first: admin/bootstrap endpoints fill SQLite; the UI reads from cache
 | Shell helpers | `start.sh`, `stop.sh`, `worker.sh`, `worker_stop.sh`, `bootstrap.sh`, `refresh_data.sh` |
 | CLI tester | `api_tester.py` |
 | AI orchestrator | `orchestration/` — event-driven agents (see below) |
+| Entity linking docs | `docs/ENTITY_LINKING.md` — ingest / enrich / retag pipeline |
+
+## Entity linking
+
+RSS articles are tagged to tickers through a multi-stage linker (cashtags, aliases, optional embeddings). Ingest uses rules-only tagging; enrichment and retag refine matches stored in `article_company`. The News API shows only high-confidence, high-trust strategies.
+
+See **[docs/ENTITY_LINKING.md](docs/ENTITY_LINKING.md)** for match strategies, false-positive gates, API endpoints, and `enrich_articles.sh` usage.
+
+```bash
+./enrich_articles.sh                                    # enrich pending → auto retag
+RETAG=1 RETAG_ALL=1 BATCH=100 ./enrich_articles.sh      # rules-only retag (~5s)
+```
 
 ## AI orchestration layer
 
@@ -61,9 +73,19 @@ SEC_USER_AGENT=you@example.com
 ## Run & stop
 
 ```bash
-sh start.sh      # → http://localhost:5000
+sh start.sh      # → http://localhost:5000 (Gunicorn)
 sh stop.sh       # uses .backend.pid
 ```
+
+Production WSGI server: **Gunicorn** on Linux/macOS (`gunicorn.conf.py`, entry `wsgi:app`). On Windows use **Waitress** instead (`pip install waitress`, then `waitress-serve --listen=0.0.0.0:5000 wsgi:app`).
+
+Direct production command (from `stock_tracker_backend/`):
+
+```bash
+gunicorn --config gunicorn.conf.py wsgi:app
+```
+
+Override workers/bind via env: `GUNICORN_BIND`, `GUNICORN_WORKERS`, `GUNICORN_THREADS`, `GUNICORN_TIMEOUT`.
 
 Logs: `backend.out`
 

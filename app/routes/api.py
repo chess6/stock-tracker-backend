@@ -9,7 +9,6 @@ from ..db import get_db
 from ..repositories import Repository
 from ..services.fundamentals import FundamentalsService
 from ..services.insiders import InsidersService
-from ..services.nasdaq import NasdaqService
 from ..services.news import NewsService
 from ..services.prices import PricesService
 
@@ -63,13 +62,6 @@ def get_insiders_service() -> InsidersService:
     return InsidersService(get_repo(), get_sec_client())
 
 
-def get_nasdaq_service() -> NasdaqService:
-    return NasdaqService(
-        api_key=current_app.config.get("NASDAQ_API_KEY"),
-        timeout=current_app.config["REQUEST_TIMEOUT"],
-    )
-
-
 @api_bp.route("/search", methods=["GET"])
 def search_ticker():
     query = request.args.get("q", "").strip()
@@ -84,15 +76,7 @@ def ticker_summary(ticker: str):
     repo = get_repo()
     company = repo.get_company_by_ticker(ticker)
     prices = get_prices_service().get_price_history(ticker.upper())
-    source = "sqlite"
-    if not prices:
-        nasdaq = get_nasdaq_service()
-        if nasdaq.is_enabled():
-            try:
-                prices = nasdaq.fetch_price_history(ticker.upper())
-                source = "nasdaq"
-            except Exception:
-                prices = []
+    source = "sqlite" if prices else "disabled"
     meta = company or {"ticker": ticker.upper(), "name": ticker.upper()}
     return jsonify({"prices": prices, "meta": meta, "source": source})
 
@@ -144,14 +128,6 @@ def tickers_top():
     companies = {ticker: repo.get_company_by_ticker(ticker) for ticker in tickers}
     price_quotes = get_prices_service().get_quotes(tickers)
     source = "sqlite" if any(price_quotes.get(t, {}).get("last") is not None for t in tickers) else "disabled"
-    if source == "disabled":
-        nasdaq = get_nasdaq_service()
-        if nasdaq.is_enabled():
-            try:
-                price_quotes = nasdaq.fetch_top_quotes(tickers)
-                source = "nasdaq"
-            except Exception:
-                price_quotes = {}
     for ticker in tickers:
         company = companies.get(ticker) or {}
         quote = price_quotes.get(ticker, {})
@@ -215,17 +191,7 @@ def tickers_daily_change():
     if not tickers:
         return jsonify({"changes": {}})
     changes = get_prices_service().get_daily_changes(tickers)
-    source = "sqlite"
-    if not any(item.get("todayClose") is not None for item in changes.values()):
-        nasdaq = get_nasdaq_service()
-        if nasdaq.is_enabled():
-            try:
-                changes = nasdaq.fetch_daily_change(tickers)
-                source = "nasdaq"
-            except Exception:
-                pass
-    if source == "sqlite" and not any(item.get("todayClose") is not None for item in changes.values()):
-        source = "disabled"
+    source = "sqlite" if any(item.get("todayClose") is not None for item in changes.values()) else "disabled"
     return jsonify({"changes": changes, "meta": {"source": source}})
 
 
@@ -247,14 +213,6 @@ def insiders_buying_sums():
     min_buy6m = request.args.get("min_buy6m", type=float)
     rows = get_insiders_service().buying_sums(tickers or None, min_buy6m=min_buy6m)
     source = "sec_edgar" if rows else "disabled"
-    if not rows:
-        nasdaq = get_nasdaq_service()
-        if nasdaq.is_enabled():
-            try:
-                rows = nasdaq.fetch_insider_buying(tickers or None)
-                source = "nasdaq"
-            except Exception:
-                rows = []
     if tickers:
         by_ticker = {row["ticker"]: row for row in rows if row.get("ticker")}
         rows = [
@@ -281,13 +239,6 @@ def ticker_sf2(ticker: str):
     payload = get_insiders_service().sf2_payload(ticker)
     if payload.get("datatable", {}).get("data"):
         return jsonify(payload)
-    # legacy: Nasdaq SHARADAR SF2 fallback — comment out when SQLite path is validated everywhere
-    nasdaq = get_nasdaq_service()
-    if nasdaq.is_enabled():
-        try:
-            return jsonify(nasdaq.fetch_sf2(ticker))
-        except Exception as exc:
-            return jsonify({"error": str(exc)}), 502
     return jsonify({"error": "No insider data in cache. Run bootstrap or refresh insiders."}), 404
 
 
@@ -401,6 +352,12 @@ def admin_status():
     return jsonify(get_repo().status_snapshot())
 
 
+@api_bp.route("/admin/job-runs", methods=["GET"])
+def admin_job_runs():
+    limit = min(max(int(request.args.get("limit", 25)), 1), 100)
+    return jsonify({"runs": get_repo().list_job_runs(limit=limit)})
+
+
 @api_bp.route("/admin/sync-companies", methods=["POST"])
 def sync_companies():
     try:
@@ -457,7 +414,7 @@ def default_feeds():
 @api_bp.route("/admin/ingest-default-feeds", methods=["POST"])
 def ingest_default_feeds():
     force_refresh = str(request.args.get("forceRefresh", "true")).lower() in {"true", "1", "yes"}
-    extract_articles = str(request.args.get("extractArticles", "true")).lower() in {"true", "1", "yes"}
+    extract_articles = str(request.args.get("extractArticles", "false")).lower() in {"true", "1", "yes"}
     feed_timeout_seconds = request.args.get("feedTimeoutSeconds", type=float)
     max_articles_per_feed = request.args.get("maxArticlesPerFeed", type=int)
     body = request.get_json(silent=True) or {}

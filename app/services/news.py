@@ -153,11 +153,9 @@ def parse_feed(xml_text: str) -> list[dict]:
 
 
 def extract_article_text(html_text: str) -> str:
-    if trafilatura is not None:
-        extracted = trafilatura.extract(html_text)
-        if extracted:
-            return extracted
-    return strip_html(html_text)
+    from .article_extraction import extract_article_text as _extract
+
+    return _extract(html_text)
 
 
 class NewsService:
@@ -325,6 +323,10 @@ class NewsService:
             self.repo.conn.commit()
         elapsed = time.monotonic() - t0
         timed_out = _timed_out()
+        if timed_out:
+            self.repo.record_feed_poll(feed_id, success=False, error_message=f"Exceeded {feed_timeout_seconds:g}s per-feed timeout")
+        else:
+            self.repo.record_feed_poll(feed_id, success=True)
         logger.info("ingest_feed done name=%r articles=%d timedOut=%s elapsed=%.1fs",
                     name, article_count, timed_out, elapsed)
         return {"feedId": feed_id, "articlesProcessed": article_count, "timedOut": timed_out}
@@ -366,7 +368,7 @@ class NewsService:
     def ingest_default_feeds(
         self,
         *,
-        extract_articles: bool = True,
+        extract_articles: bool = False,
         max_articles_per_feed: int | None = DEFAULT_MAX_ARTICLES_PER_FEED,
         force_refresh: bool = False,
         feed_timeout_seconds: float = DEFAULT_FEED_TIMEOUT_SECONDS,
@@ -422,11 +424,15 @@ class NewsService:
                     feed_result["status"] = "timeout"
                     feed_result["error"] = f"Exceeded {feed_timeout_seconds:g}s per-feed timeout"
                     timed_out_feeds += 1
+                elif feed_result.get("feedId") and feed_result.get("status") == "ok":
+                    self.repo.record_feed_poll(feed_result["feedId"], success=True)
             except requests.RequestException as exc:
                 logger.warning("ingest_default_feeds feed error name=%r: %s", feed["name"], exc)
                 feed_result["status"] = "error"
                 feed_result["error"] = str(exc)
                 failed_feeds += 1
+                if feed_result.get("feedId"):
+                    self.repo.record_feed_poll(feed_result["feedId"], success=False, error_message=str(exc))
             results.append(feed_result)
         dates_normalized = self.repo.normalize_published_dates()
         deduped = self.repo.deduplicate_articles()

@@ -28,6 +28,16 @@ def extract_article_text(html_text: str) -> str:
         extracted = trafilatura.extract(html_text)
         if extracted:
             return extracted.strip()
+    try:
+        from newspaper import Article  # type: ignore
+
+        article = Article("")
+        article.set_html(html_text)
+        article.parse()
+        if article.text and article.text.strip():
+            return article.text.strip()
+    except Exception:  # pragma: no cover - optional dependency
+        pass
     from .news import strip_html
 
     return strip_html(html_text)
