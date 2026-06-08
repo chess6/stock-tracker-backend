@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+from app.services.insider_analysis import (
+    analyze_insider_activity,
+    compute_intensity_score,
+    detect_clusters,
+    summarize_window,
+)
+
+
+def _txn(owner: str, code: str, txn_date: str, value: float = 10000.0) -> dict:
+    return {
+        "owner_name": owner,
+        "transaction_code": code,
+        "transaction_date": txn_date,
+        "transaction_value": value,
+        "price_per_share": 10.0,
+    }
+
+
+def test_compute_intensity_score_increases_with_buys():
+    low = compute_intensity_score(1, 1000, 30)
+    high = compute_intensity_score(5, 1_000_000, 10)
+    assert high > low
+    assert 0 <= high <= 1
+
+
+def test_summarize_window_counts_buys_and_sells():
+    today = date.today()
+    txns = [
+        _txn("Alice", "P", today.isoformat(), 50000),
+        _txn("Bob", "S", today.isoformat(), 20000),
+        _txn("Carol", "P", (today - timedelta(days=120)).isoformat(), 10000),
+    ]
+    summary = summarize_window(txns, days=90, as_of=today)
+    assert summary["buyCount"] == 1
+    assert summary["sellCount"] == 1
+    assert summary["uniqueBuyers"] == 1
+    assert summary["totalBuyValue"] == 50000
+
+
+def test_detect_clusters_requires_three_unique_buyers():
+    today = date.today()
+    txns = [
+        _txn("Alice", "P", (today - timedelta(days=5)).isoformat()),
+        _txn("Bob", "P", (today - timedelta(days=3)).isoformat()),
+        _txn("Carol", "P", (today - timedelta(days=1)).isoformat()),
+    ]
+    clusters = detect_clusters(txns, as_of=today)
+    assert len(clusters) >= 1
+    assert clusters[0]["uniqueBuyers"] >= 3
+    assert clusters[0]["isCluster"] is True
+
+
+def test_detect_clusters_ignores_sparse_buying():
+    today = date.today()
+    txns = [
+        _txn("Alice", "P", (today - timedelta(days=5)).isoformat()),
+        _txn("Bob", "P", (today - timedelta(days=60)).isoformat()),
+    ]
+    clusters = detect_clusters(txns, as_of=today)
+    assert clusters == []
+
+
+def test_analyze_insider_activity_includes_ratio_windows():
+    today = date.today()
+    txns = [_txn("Alice", "P", today.isoformat())]
+    result = analyze_insider_activity(txns)
+    assert result["buyCount90d"] == 1
+    assert "90d" in result["ratios"]
+    assert "180d" in result["ratios"]
+    assert "365d" in result["ratios"]

@@ -650,6 +650,24 @@ def refresh_macro():
     return jsonify(payload)
 
 
+@api_bp.route("/admin/backfill-market-reactions", methods=["POST"])
+def backfill_market_reactions_admin():
+    from ..services.market_reaction import backfill_market_reactions
+    from ..services.narrative import clear_narrative_cache
+
+    body = request.get_json(silent=True) or {}
+    ticker = request.args.get("ticker") or body.get("ticker")
+    limit = request.args.get("limit", type=int) or body.get("limit") or 200
+    limit = min(max(int(limit), 1), 1000)
+    try:
+        payload = backfill_market_reactions(get_repo(), ticker=ticker, limit=limit)
+        clear_narrative_cache()
+    except Exception as exc:
+        current_app.logger.exception("Market reaction backfill failed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(payload)
+
+
 @api_bp.route("/admin/refresh-prices", methods=["POST"])
 def refresh_prices():
     tickers = request.json.get("tickers") if request.is_json else None

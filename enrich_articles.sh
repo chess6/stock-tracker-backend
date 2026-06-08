@@ -23,6 +23,10 @@ fi
 RETAG_EMBEDDINGS="${RETAG_EMBEDDINGS:-0}"
 
 # FORCE=1 requeues completed articles and runs full enrichment again.
+#   Do NOT use FORCE to refresh market reactions for Research/narrative — it only
+#   processes the newest pending batch and may skip ticker-linked articles. Instead:
+#     ./backfill_market_reactions.sh AAPL,MSFT
+#   after refresh-macro (SPY benchmark) has run — see refresh_data.sh.
 # RETAG=1 skips enrichment and only re-tags completed articles.
 # RETAG_ALL=1 re-tags every completed article (not just those missing enrichment tags).
 # SKIP_RETAG=1 disables the automatic post-enrichment entity-linking pass.
@@ -151,6 +155,7 @@ if [ "$RETAG" = "1" ]; then
   echo "Mode: RETAG-ONLY (entity linking on completed articles)"
 elif [ "$FORCE" = "1" ]; then
   echo "Mode: FORCE (requeue completed articles, full enrichment)"
+  echo "Note: for Research narrative market reactions use ./backfill_market_reactions.sh instead"
 else
   echo "Mode: ENRICH + auto entity-linking pass for completed articles"
 fi

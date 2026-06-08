@@ -13,6 +13,13 @@ from .fundamentals import (
 )
 from .prices import PricesService
 from .scoring import margin_trend_delta, share_dilution_rate, _gross_margin, _operating_margin
+from .insider_analysis import (
+    analyze_insider_activity,
+    cluster_records_for_storage,
+    detect_clusters,
+    format_transaction,
+)
+from .narrative import build_narrative_analysis
 
 logger = logging.getLogger("stock_tracker.research")
 
@@ -59,6 +66,7 @@ class ResearchService:
         insider_summary = {
             row["ticker"]: row for row in self.repo.fetch_insider_summary_90d(tickers)
         }
+        self._enrich_insider_summaries(insider_summary, tickers)
 
         results: dict[str, dict] = {}
         for row in wide_rows:
@@ -178,6 +186,7 @@ class ResearchService:
 
         score_history = self.repo.fetch_company_scores(company["id"], dimension="ARY")
         insiders = self.repo.fetch_insider_transactions(symbol, limit=500)
+        insider_detail = self.get_insider_detail(symbol)
 
         return {
             "ticker": symbol,
@@ -186,12 +195,89 @@ class ResearchService:
             "periods": periods,
             "scoreHistory": score_history,
             "insiders": insiders,
+            "insiderAnalysis": insider_detail,
             "price": {
                 "latest": latest_price,
                 "stats": market_stats,
                 "history": list(reversed(price_rows[:252])),
             },
         }
+
+    def get_insider_detail(self, ticker: str) -> dict:
+        symbol = ticker.upper()
+        company = self.repo.get_company_by_ticker(symbol)
+        if not company:
+            return {"ticker": symbol, "error": "not_found"}
+
+        raw_transactions = self.repo.fetch_insider_transactions_raw(company["id"])
+        summary = analyze_insider_activity(raw_transactions)
+        stored_clusters = self.repo.fetch_insider_clusters_for_company(company["id"])
+        clusters = stored_clusters if stored_clusters else detect_clusters(raw_transactions)
+        recent = [format_transaction(txn) for txn in raw_transactions[:100]]
+
+        return {
+            "ticker": symbol,
+            "companyName": company.get("name"),
+            "summary": summary,
+            "clusters": clusters,
+            "recentTransactions": recent,
+        }
+
+    def get_insider_clusters(
+        self,
+        tickers: list[str] | None = None,
+        *,
+        limit: int = 50,
+    ) -> dict:
+        clusters = self.repo.fetch_insider_cluster_rankings(tickers, limit=limit)
+        if clusters or not tickers:
+            return {"clusters": clusters}
+
+        # Fallback: compute on-the-fly when materialized data is empty
+        computed: list[dict] = []
+        for symbol in tickers:
+            detail = self.get_insider_detail(symbol)
+            if detail.get("error"):
+                continue
+            for cluster in detail.get("clusters") or []:
+                computed.append(
+                    {
+                        **cluster,
+                        "ticker": symbol,
+                        "companyName": detail.get("companyName"),
+                    }
+                )
+        computed.sort(
+            key=lambda c: (c.get("intensityScore") or 0, c.get("totalBuyValue") or 0),
+            reverse=True,
+        )
+        return {"clusters": computed[:limit]}
+
+    def get_narrative(self, ticker: str) -> dict:
+        return build_narrative_analysis(self.repo, ticker)
+
+    def refresh_insider_clusters(self, company_id: int) -> int:
+        raw_transactions = self.repo.fetch_insider_transactions_raw(company_id)
+        records = cluster_records_for_storage(company_id, raw_transactions)
+        written = self.repo.upsert_insider_cluster_analysis(company_id, records)
+        logger.debug("refresh_insider_clusters company_id=%s clusters=%d", company_id, written)
+        return written
+
+    def _enrich_insider_summaries(self, insider_summary: dict[str, dict], tickers: list[str]) -> None:
+        for symbol in tickers:
+            key = symbol.upper()
+            base = insider_summary.get(key)
+            if not base:
+                continue
+            company = self.repo.get_company_by_ticker(key)
+            if not company:
+                continue
+            raw = self.repo.fetch_insider_transactions_raw(company["id"], limit=500)
+            analysis = analyze_insider_activity(raw)
+            base["uniqueBuyers90d"] = analysis["uniqueBuyers90d"]
+            base["intensityScore90d"] = analysis["intensityScore90d"]
+            base["totalBuyValue90d"] = analysis["totalBuyValue90d"]
+            base["totalSellValue90d"] = analysis["totalSellValue90d"]
 
     @staticmethod
     def _price_near_date(price_rows: list[dict], period_end: str | None) -> float | None:

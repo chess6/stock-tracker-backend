@@ -33,6 +33,12 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         tickers = payload.get("tickers") or ctx.default_tickers
         return ctx.fundamentals.refresh_fundamentals(tickers)
 
+    def refresh_company_scores(payload: dict) -> dict:
+        if payload.get("all"):
+            return ctx.fundamentals.refresh_company_scores_batch(None)
+        tickers = payload.get("tickers") or ctx.default_tickers
+        return ctx.fundamentals.refresh_company_scores_batch(tickers)
+
     def ingest_default_feeds(payload: dict) -> dict:
         kwargs = {
             "extract_articles": payload.get("extract_articles", True),
@@ -117,6 +123,7 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
     return {
         "sync_companies": sync_companies,
         "refresh_fundamentals": refresh_fundamentals,
+        "refresh_company_scores": refresh_company_scores,
         "enrich_metadata": enrich_metadata,
         "ingest_default_feeds": ingest_default_feeds,
         "refresh_prices": refresh_prices,

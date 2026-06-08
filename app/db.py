@@ -288,6 +288,26 @@ CREATE TABLE IF NOT EXISTS company_scores (
 );
 
 CREATE INDEX IF NOT EXISTS idx_company_scores_company_period ON company_scores(company_id, period_end DESC);
+
+CREATE TABLE IF NOT EXISTS insider_cluster_analysis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    buy_count INTEGER NOT NULL DEFAULT 0,
+    sell_count INTEGER NOT NULL DEFAULT 0,
+    unique_buyers INTEGER NOT NULL DEFAULT 0,
+    total_buy_value REAL,
+    total_sell_value REAL,
+    avg_buy_price REAL,
+    intensity_score REAL,
+    computed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    UNIQUE (company_id, window_start, window_end)
+);
+
+CREATE INDEX IF NOT EXISTS idx_insider_cluster_company ON insider_cluster_analysis(company_id, window_start DESC);
+CREATE INDEX IF NOT EXISTS idx_insider_cluster_intensity ON insider_cluster_analysis(intensity_score DESC);
 """
 
 

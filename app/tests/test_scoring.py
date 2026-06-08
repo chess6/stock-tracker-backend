@@ -312,6 +312,179 @@ def test_refresh_fundamentals_persists_company_scores(app):
     assert fake_repo.scores[0]["survivability"] is not None
 
 
+def test_refresh_company_scores_batch(app):
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies(
+            [{"ticker": "GOOD", "name": "Good Co", "cik": "0000000001", "sector": "Tech", "industry": "Hardware"}]
+        )
+        company = repo.get_company_by_ticker("GOOD")
+        repo.upsert_fundamentals(
+            [
+                {
+                    "company_id": company["id"],
+                    "metric": "revenue",
+                    "value": 1000.0,
+                    "unit": "USD",
+                    "period_end": "2024-12-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2024,
+                    "fiscal_quarter": "FY",
+                    "filing_date": "2025-01-20",
+                    "form": "10-K",
+                    "accession": "test",
+                    "source": "test",
+                    "taxonomy": "us-gaap",
+                    "xbrl_concept": "Revenues",
+                },
+                {
+                    "company_id": company["id"],
+                    "metric": "netinc",
+                    "value": 120.0,
+                    "unit": "USD",
+                    "period_end": "2024-12-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2024,
+                    "fiscal_quarter": "FY",
+                    "filing_date": "2025-01-20",
+                    "form": "10-K",
+                    "accession": "test",
+                    "source": "test",
+                    "taxonomy": "us-gaap",
+                    "xbrl_concept": "NetIncomeLoss",
+                },
+                {
+                    "company_id": company["id"],
+                    "metric": "assets",
+                    "value": 2000.0,
+                    "unit": "USD",
+                    "period_end": "2024-12-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2024,
+                    "fiscal_quarter": "FY",
+                    "filing_date": "2025-01-20",
+                    "form": "10-K",
+                    "accession": "test",
+                    "source": "test",
+                    "taxonomy": "us-gaap",
+                    "xbrl_concept": "Assets",
+                },
+                {
+                    "company_id": company["id"],
+                    "metric": "revenue",
+                    "value": 900.0,
+                    "unit": "USD",
+                    "period_end": "2023-12-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2023,
+                    "fiscal_quarter": "FY",
+                    "filing_date": "2024-01-20",
+                    "form": "10-K",
+                    "accession": "test2",
+                    "source": "test",
+                    "taxonomy": "us-gaap",
+                    "xbrl_concept": "Revenues",
+                },
+                {
+                    "company_id": company["id"],
+                    "metric": "netinc",
+                    "value": 100.0,
+                    "unit": "USD",
+                    "period_end": "2023-12-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2023,
+                    "fiscal_quarter": "FY",
+                    "filing_date": "2024-01-20",
+                    "form": "10-K",
+                    "accession": "test2",
+                    "source": "test",
+                    "taxonomy": "us-gaap",
+                    "xbrl_concept": "NetIncomeLoss",
+                },
+                {
+                    "company_id": company["id"],
+                    "metric": "assets",
+                    "value": 1800.0,
+                    "unit": "USD",
+                    "period_end": "2023-12-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2023,
+                    "fiscal_quarter": "FY",
+                    "filing_date": "2024-01-20",
+                    "form": "10-K",
+                    "accession": "test2",
+                    "source": "test",
+                    "taxonomy": "us-gaap",
+                    "xbrl_concept": "Assets",
+                },
+                {
+                    "company_id": company["id"],
+                    "metric": "ncfo",
+                    "value": 150.0,
+                    "unit": "USD",
+                    "period_end": "2024-12-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2024,
+                    "fiscal_quarter": "FY",
+                    "filing_date": "2025-01-20",
+                    "form": "10-K",
+                    "accession": "test",
+                    "source": "test",
+                    "taxonomy": "us-gaap",
+                    "xbrl_concept": "NetCashProvidedByUsedInOperatingActivities",
+                },
+                {
+                    "company_id": company["id"],
+                    "metric": "liabilities",
+                    "value": 800.0,
+                    "unit": "USD",
+                    "period_end": "2024-12-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2024,
+                    "fiscal_quarter": "FY",
+                    "filing_date": "2025-01-20",
+                    "form": "10-K",
+                    "accession": "test",
+                    "source": "test",
+                    "taxonomy": "us-gaap",
+                    "xbrl_concept": "Liabilities",
+                },
+            ]
+        )
+        repo.upsert_prices(
+            "GOOD",
+            [
+                {"date": "2024-12-31", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "volume": 100},
+                {"date": "2023-12-31", "open": 8.0, "high": 9.0, "low": 7.0, "close": 8.0, "volume": 100},
+            ],
+            source="test",
+        )
+
+        class StubSec:
+            def fetch_company_facts(self, cik):
+                return {"facts": {}}
+
+            def fetch_submissions(self, cik):
+                return {"filings": {"recent": {}}}
+
+        service = FundamentalsService(repo, StubSec())
+        result = service.refresh_company_scores_batch(["GOOD"])
+        assert "GOOD" in result["tickers"]
+        assert result["periodsWritten"] >= 1
+
+        scores = repo.fetch_company_scores(company["id"], dimension="ARY")
+        assert len(scores) >= 1
+        assert scores[0]["piotroskiF"] is not None
+
+
 def test_research_routes_return_screener_and_ticker_payload(app, client):
     with app.app_context():
         repo = Repository(get_db())
@@ -392,3 +565,75 @@ def test_research_routes_return_screener_and_ticker_payload(app, client):
     assert detail_payload["ticker"] == "AAPL"
     assert len(detail_payload["periods"]) >= 1
     assert len(detail_payload["scoreHistory"]) >= 1
+
+
+def test_research_insider_routes(app, client):
+    from datetime import date, timedelta
+
+    today = date.today()
+    d1 = (today - timedelta(days=5)).isoformat()
+    d2 = (today - timedelta(days=3)).isoformat()
+    d3 = (today - timedelta(days=1)).isoformat()
+
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "GME", "name": "GameStop", "cik": "0001326380"}])
+        company = repo.get_company_by_ticker("GME")
+        repo.upsert_insider_transactions(
+            company["id"],
+            [
+                {
+                    "filing_date": d1,
+                    "transaction_date": d1,
+                    "owner_name": "Insider A",
+                    "transaction_code": "P",
+                    "shares": 1000,
+                    "price_per_share": 20.0,
+                    "transaction_value": 20000.0,
+                    "security_title": "Common",
+                    "form": "4",
+                    "accession": "acc-1",
+                },
+                {
+                    "filing_date": d2,
+                    "transaction_date": d2,
+                    "owner_name": "Insider B",
+                    "transaction_code": "P",
+                    "shares": 500,
+                    "price_per_share": 21.0,
+                    "transaction_value": 10500.0,
+                    "security_title": "Common",
+                    "form": "4",
+                    "accession": "acc-2",
+                },
+                {
+                    "filing_date": d3,
+                    "transaction_date": d3,
+                    "owner_name": "Insider C",
+                    "transaction_code": "P",
+                    "shares": 800,
+                    "price_per_share": 22.0,
+                    "transaction_value": 17600.0,
+                    "security_title": "Common",
+                    "form": "4",
+                    "accession": "acc-3",
+                },
+            ],
+        )
+        from app.services.research import ResearchService
+        from app.services.prices import PricesService
+
+        ResearchService(repo, PricesService(repo)).refresh_insider_clusters(company["id"])
+
+    detail = client.get("/api/research/insiders/GME")
+    assert detail.status_code == 200
+    payload = detail.get_json()
+    assert payload["ticker"] == "GME"
+    assert payload["summary"]["buyCount90d"] >= 3
+    assert len(payload["clusters"]) >= 1
+
+    clusters = client.get("/api/research/insiders/clusters?tickers=GME")
+    assert clusters.status_code == 200
+    cluster_payload = clusters.get_json()
+    assert len(cluster_payload["clusters"]) >= 1
+    assert cluster_payload["clusters"][0]["ticker"] == "GME"

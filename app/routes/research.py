@@ -35,3 +35,27 @@ def research_ticker(ticker: str):
     if payload.get("error") == "not_found":
         return jsonify(payload), 404
     return jsonify(payload)
+
+
+@research_bp.route("/insiders/clusters", methods=["GET"])
+def research_insider_clusters():
+    tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    limit = min(int(request.args.get("limit", 50)), 200)
+    payload = get_research_service().get_insider_clusters(tickers or None, limit=limit)
+    return jsonify(payload)
+
+
+@research_bp.route("/insiders/<ticker>", methods=["GET"])
+def research_insiders(ticker: str):
+    payload = get_research_service().get_insider_detail(ticker)
+    if payload.get("error") == "not_found":
+        return jsonify(payload), 404
+    return jsonify(payload)
+
+
+@research_bp.route("/narrative/<ticker>", methods=["GET"])
+def research_narrative(ticker: str):
+    payload = get_research_service().get_narrative(ticker)
+    if payload.get("error") == "not_found":
+        return jsonify(payload), 404
+    return jsonify(payload)

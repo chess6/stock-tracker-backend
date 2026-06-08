@@ -80,6 +80,58 @@ def test_market_reaction_abnormal_return(app):
         assert round(reactions[0].abnormal_return_1d or 0, 4) == round(0.1 - 0.005, 4)
 
 
+def test_backfill_market_reactions_updates_stale_rows(app):
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "AAPL", "name": "Apple"}, {"ticker": "SPY", "name": "SPY"}])
+        article_id = _insert_article(repo, published_at="2025-01-20T14:00:00Z")
+        company = repo.get_company_by_ticker("AAPL")
+        repo.link_article_company(article_id, company["id"], "cashtag", 0.95)
+        repo.upsert_prices(
+            "AAPL",
+            [{"date": "2025-01-20", "close": 100.0}, {"date": "2025-01-21", "close": 110.0}],
+            source="test",
+        )
+        repo.upsert_prices(
+            "SPY",
+            [{"date": "2025-01-20", "close": 400.0}, {"date": "2025-01-21", "close": 402.0}],
+            source="test",
+        )
+
+        class Reaction:
+            def __init__(self, **kwargs):
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        repo.replace_article_market_reactions(
+            article_id,
+            [
+                Reaction(
+                    ticker="AAPL",
+                    published_at="2025-01-20T14:00:00Z",
+                    sentiment_score=0.5,
+                    primary_event=None,
+                    price_at_publish=100.0,
+                    return_1d=0.0,
+                    return_1w=0.0,
+                    benchmark_return_1d=None,
+                    abnormal_return_1d=None,
+                )
+            ],
+        )
+
+        from app.services.market_reaction import backfill_market_reactions
+
+        payload = backfill_market_reactions(repo, ticker="AAPL", limit=10)
+        assert payload["articlesUpdated"] == 1
+        row = repo.conn.execute(
+            "SELECT benchmark_return_1d, abnormal_return_1d FROM article_market_reactions WHERE article_id = ? AND ticker = 'AAPL'",
+            (article_id,),
+        ).fetchone()
+        assert row["benchmark_return_1d"] is not None
+        assert row["abnormal_return_1d"] is not None
+
+
 def test_rank_score_prefers_strong_sentiment_and_quality_source():
     high = compute_rank_score(
         RankInputs(sentiment_score=0.9, vader_compound=0.8, source_domain="reuters.com", novelty_score=0.9)

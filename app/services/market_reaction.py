@@ -98,3 +98,67 @@ def compute_market_reactions(
             )
         )
     return reactions
+
+
+def backfill_market_reactions(
+    repo: Repository,
+    *,
+    ticker: str | None = None,
+    limit: int = 200,
+) -> dict:
+    """Recompute stored market reactions using current price/benchmark data."""
+    symbol = ticker.upper() if ticker else None
+    params: list[object] = []
+    ticker_clause = ""
+    if symbol:
+        ticker_clause = "AND c.ticker = ?"
+        params.append(symbol)
+
+    rows = repo.conn.execute(
+        f"""
+        SELECT DISTINCT a.id, a.published_at, a.sentiment_score
+        FROM articles a
+        JOIN article_company ac ON ac.article_id = a.id AND ac.confidence >= 0.80
+        JOIN companies c ON c.id = ac.company_id
+        WHERE a.duplicate_of_article_id IS NULL
+          {ticker_clause}
+        ORDER BY a.published_at DESC, a.id DESC
+        LIMIT ?
+        """,
+        [*params, int(limit)],
+    ).fetchall()
+
+    updated = 0
+    for row in rows:
+        article_id = row["id"]
+        event_row = repo.conn.execute(
+            """
+            SELECT event_type
+            FROM article_event_classifications
+            WHERE article_id = ?
+            ORDER BY confidence DESC
+            LIMIT 1
+            """,
+            (article_id,),
+        ).fetchone()
+        tickers = repo.get_article_tickers(article_id)
+        if not tickers:
+            continue
+        reactions = compute_market_reactions(
+            repo,
+            article_id=article_id,
+            tickers=tickers,
+            published_at=row["published_at"],
+            sentiment_score=row["sentiment_score"],
+            primary_event=event_row["event_type"] if event_row else None,
+        )
+        repo.replace_article_market_reactions(article_id, reactions)
+        updated += 1
+
+    logger.info(
+        "backfill_market_reactions ticker=%s articles=%d limit=%d",
+        symbol or "*",
+        updated,
+        limit,
+    )
+    return {"ticker": symbol, "articlesUpdated": updated, "limit": int(limit)}

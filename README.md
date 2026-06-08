@@ -140,6 +140,8 @@ All admin routes are unauthenticated — intended for localhost dev only.
 | POST | `/api/admin/sync-companies` | SEC `company_tickers.json` → `companies` (~10k rows) |
 | POST | `/api/admin/refresh-fundamentals?tickers=` | SEC XBRL CompanyFacts → `fundamentals` |
 | POST | `/api/admin/refresh-prices?tickers=` | Stooq/yfinance OHLCV → `prices` |
+| POST | `/api/admin/refresh-macro` | Benchmark ETF prices (SPY, QQQ, …) → `prices` |
+| POST | `/api/admin/backfill-market-reactions?ticker=&limit=` | Recompute `article_market_reactions` (Research narrative / topEvents) |
 | POST | `/api/admin/refresh-insiders?tickers=` | SEC Form 4 → `insider_transactions` |
 | POST | `/api/admin/ingest-default-feeds` | Poll 53 RSS feeds; `forceRefresh=true` by default |
 | POST | `/api/admin/dedup-articles` | Normalize dates, semantic dedup, keyword sentiment backfill |
@@ -165,6 +167,13 @@ curl -X POST http://localhost:5000/api/admin/ingest-feed \
 **New install:** `sh start.sh` → `sh bootstrap.sh JPM,MCD`
 
 **Daily refresh:** `sh refresh_data.sh JPM,MCD` or run `sh worker.sh`
+
+**Research narrative (sentiment vs price, topEvents):** macro benchmark must exist, then backfill reactions — not `FORCE=1 enrich`:
+
+```bash
+curl -X POST http://localhost:5000/api/admin/refresh-macro   # included in refresh_data.sh
+./backfill_market_reactions.sh AAPL,MSFT                       # ~1s per ticker
+```
 
 **Stale news:** `curl -X POST http://localhost:5000/api/admin/ingest-default-feeds` then `dedup-articles`
 

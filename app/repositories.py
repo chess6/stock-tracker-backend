@@ -201,6 +201,21 @@ class Repository:
         ).fetchall()
         return [row["ticker"] for row in rows]
 
+    def fetch_tickers_with_fundamentals(self, dimension: str = "ARY", limit: int | None = None) -> list[str]:
+        sql = """
+            SELECT DISTINCT c.ticker
+            FROM companies c
+            INNER JOIN fundamentals f ON f.company_id = c.id
+            WHERE f.dimension = ?
+            ORDER BY c.ticker
+        """
+        params: list = [dimension]
+        if limit is not None and limit > 0:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [row["ticker"] for row in rows]
+
     def list_companies_for_matching(self) -> list[dict]:
         rows = self.conn.execute("SELECT id, ticker, name FROM companies").fetchall()
         return [dict(row) for row in rows]
@@ -458,6 +473,159 @@ class Repository:
                 }
             )
         return results
+
+    def fetch_insider_transactions_raw(self, company_id: int, limit: int = 2000) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                filing_date,
+                transaction_date,
+                owner_name,
+                transaction_code,
+                shares,
+                price_per_share,
+                transaction_value,
+                security_title
+            FROM insider_transactions
+            WHERE company_id = ?
+            ORDER BY transaction_date DESC, filing_date DESC
+            LIMIT ?
+            """,
+            (company_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_insider_cluster_analysis(self, company_id: int, records: Iterable[dict]) -> int:
+        rows = [
+            (
+                company_id,
+                record["window_start"],
+                record["window_end"],
+                record.get("buy_count", 0),
+                record.get("sell_count", 0),
+                record.get("unique_buyers", 0),
+                record.get("total_buy_value"),
+                record.get("total_sell_value"),
+                record.get("avg_buy_price"),
+                record.get("intensity_score"),
+            )
+            for record in records
+        ]
+        if not rows:
+            self.conn.execute(
+                "DELETE FROM insider_cluster_analysis WHERE company_id = ?",
+                (company_id,),
+            )
+            self.conn.commit()
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO insider_cluster_analysis (
+                company_id, window_start, window_end,
+                buy_count, sell_count, unique_buyers,
+                total_buy_value, total_sell_value, avg_buy_price, intensity_score,
+                computed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(company_id, window_start, window_end) DO UPDATE SET
+                buy_count=excluded.buy_count,
+                sell_count=excluded.sell_count,
+                unique_buyers=excluded.unique_buyers,
+                total_buy_value=excluded.total_buy_value,
+                total_sell_value=excluded.total_sell_value,
+                avg_buy_price=excluded.avg_buy_price,
+                intensity_score=excluded.intensity_score,
+                computed_at=CURRENT_TIMESTAMP
+            """,
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def fetch_insider_clusters_for_company(self, company_id: int, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                window_start,
+                window_end,
+                buy_count,
+                sell_count,
+                unique_buyers,
+                total_buy_value,
+                total_sell_value,
+                avg_buy_price,
+                intensity_score,
+                computed_at
+            FROM insider_cluster_analysis
+            WHERE company_id = ?
+            ORDER BY intensity_score DESC, window_start DESC
+            LIMIT ?
+            """,
+            (company_id, limit),
+        ).fetchall()
+        return [self._format_cluster_row(row) for row in rows]
+
+    def fetch_insider_cluster_rankings(
+        self,
+        tickers: list[str] | None = None,
+        *,
+        limit: int = 50,
+        min_unique_buyers: int = 3,
+    ) -> list[dict]:
+        params: list = [min_unique_buyers]
+        ticker_filter = ""
+        if tickers:
+            placeholders = ",".join("?" for _ in tickers)
+            ticker_filter = f" AND c.ticker IN ({placeholders})"
+            params.extend([t.upper() for t in tickers])
+        params.append(limit)
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                c.ticker,
+                c.name AS company_name,
+                ica.window_start,
+                ica.window_end,
+                ica.buy_count,
+                ica.sell_count,
+                ica.unique_buyers,
+                ica.total_buy_value,
+                ica.total_sell_value,
+                ica.avg_buy_price,
+                ica.intensity_score,
+                ica.computed_at
+            FROM insider_cluster_analysis ica
+            JOIN companies c ON c.id = ica.company_id
+            WHERE ica.unique_buyers >= ?
+              AND ica.intensity_score IS NOT NULL
+              {ticker_filter}
+            ORDER BY ica.intensity_score DESC, ica.total_buy_value DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        output = []
+        for row in rows:
+            cluster = self._format_cluster_row(row)
+            cluster["ticker"] = row["ticker"]
+            cluster["companyName"] = row["company_name"]
+            output.append(cluster)
+        return output
+
+    @staticmethod
+    def _format_cluster_row(row: sqlite3.Row) -> dict:
+        return {
+            "windowStart": row["window_start"],
+            "windowEnd": row["window_end"],
+            "buyCount": row["buy_count"],
+            "sellCount": row["sell_count"],
+            "uniqueBuyers": row["unique_buyers"],
+            "totalBuyValue": row["total_buy_value"],
+            "totalSellValue": row["total_sell_value"],
+            "avgBuyPrice": row["avg_buy_price"],
+            "intensityScore": row["intensity_score"],
+            "computedAt": row["computed_at"],
+            "isCluster": (row["unique_buyers"] or 0) >= 3,
+        }
 
     def upsert_feed(self, feed: dict) -> int:
         cursor = self.conn.execute(
@@ -1188,6 +1356,64 @@ class Repository:
                     "sourceDomain": row["source_domain"],
                     "tickers": [match["ticker"] for match in ticker_matches],
                     "tickerMatches": ticker_matches,
+                }
+            )
+        return output
+
+    def fetch_narrative_articles_for_ticker(self, ticker: str, limit: int = 500) -> list[dict]:
+        display_clause, display_params = _news_display_match_clause("ac")
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                a.id,
+                a.title,
+                a.summary,
+                a.canonical_url,
+                a.published_at,
+                a.sentiment_label,
+                a.sentiment_score,
+                amr.abnormal_return_1d,
+                amr.return_1d,
+                amr.price_at_publish,
+                amr.primary_event,
+                amr.sentiment_score AS reaction_sentiment,
+                (
+                    SELECT event_type
+                    FROM article_event_classifications ec
+                    WHERE ec.article_id = a.id
+                    ORDER BY ec.confidence DESC
+                    LIMIT 1
+                ) AS event_type
+            FROM articles a
+            JOIN article_company ac ON ac.article_id = a.id
+                AND ac.confidence >= 0.85
+                AND {display_clause}
+            JOIN companies c ON c.id = ac.company_id
+            LEFT JOIN article_market_reactions amr
+                ON amr.article_id = a.id AND amr.ticker = c.ticker
+            WHERE c.ticker = ?
+              AND a.duplicate_of_article_id IS NULL
+            ORDER BY a.published_at DESC, a.id DESC
+            LIMIT ?
+            """,
+            [*display_params, ticker.upper(), limit],
+        ).fetchall()
+        output: list[dict] = []
+        for row in rows:
+            output.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "url": row["canonical_url"],
+                    "publishedAt": row["published_at"],
+                    "sentimentLabel": row["sentiment_label"],
+                    "sentimentScore": row["sentiment_score"],
+                    "reactionSentiment": row["reaction_sentiment"],
+                    "abnormalReturn1d": row["abnormal_return_1d"],
+                    "return1d": row["return_1d"],
+                    "priceAtPublish": row["price_at_publish"],
+                    "primaryEvent": row["primary_event"],
+                    "eventType": row["event_type"],
                 }
             )
         return output

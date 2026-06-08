@@ -600,6 +600,42 @@ class FundamentalsService:
         logger.debug("refresh_company_scores ticker=%s periods=%d", ticker, written)
         return written
 
+    def refresh_company_scores_batch(self, tickers: list[str] | None = None) -> dict:
+        """Recompute materialized scores for tickers or all companies with annual fundamentals."""
+        if tickers:
+            target = [item.strip().upper() for item in tickers if item and str(item).strip()]
+        else:
+            target = self.repo.fetch_tickers_with_fundamentals(dimension="ARY")
+        logger.info("refresh_company_scores_batch start tickers=%d", len(target))
+        t0 = time.monotonic()
+        refreshed: list[str] = []
+        skipped: list[dict] = []
+        periods_written = 0
+        for ticker in target:
+            company = self.repo.get_company_by_ticker(ticker)
+            if not company:
+                skipped.append({"ticker": ticker, "reason": "not_found"})
+                continue
+            written = self._refresh_company_scores(company["id"], ticker)
+            if written:
+                refreshed.append(ticker)
+                periods_written += written
+            else:
+                skipped.append({"ticker": ticker, "reason": "no_annual_data"})
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "refresh_company_scores_batch done tickers=%d skipped=%d periods=%d elapsed=%.1fs",
+            len(refreshed),
+            len(skipped),
+            periods_written,
+            elapsed,
+        )
+        return {
+            "tickers": refreshed,
+            "periodsWritten": periods_written,
+            "skipped": skipped,
+        }
+
     def enrich_company_metadata(self, tickers: list[str]) -> dict:
         logger.info("enrich_company_metadata start tickers=%d", len(tickers))
         t0 = time.monotonic()
