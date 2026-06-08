@@ -270,6 +270,24 @@ CREATE TABLE IF NOT EXISTS company_aliases (
 
 CREATE INDEX IF NOT EXISTS idx_company_aliases_normalized ON company_aliases(normalized_alias);
 CREATE INDEX IF NOT EXISTS idx_company_aliases_company ON company_aliases(company_id);
+
+CREATE TABLE IF NOT EXISTS company_scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    period_end TEXT NOT NULL,
+    dimension TEXT NOT NULL DEFAULT 'ARY',
+    piotroski_f INTEGER,
+    altman_z REAL,
+    beneish_m REAL,
+    survivability REAL,
+    piotroski_components TEXT,
+    altman_components TEXT,
+    computed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    UNIQUE (company_id, period_end, dimension)
+);
+
+CREATE INDEX IF NOT EXISTS idx_company_scores_company_period ON company_scores(company_id, period_end DESC);
 """
 
 
@@ -391,6 +409,17 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_article_company_confidence ON article_company(article_id, confidence DESC)"
     )
+
+    feed_cols = {row[1] for row in conn.execute("PRAGMA table_info(feeds)").fetchall()}
+    feed_migrations = {
+        "last_success_at": "TEXT",
+        "last_error_at": "TEXT",
+        "last_error_message": "TEXT",
+        "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, col_type in feed_migrations.items():
+        if column not in feed_cols:
+            conn.execute(f"ALTER TABLE feeds ADD COLUMN {column} {col_type}")
     conn.commit()
 
 

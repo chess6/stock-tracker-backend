@@ -55,17 +55,27 @@ class Repository:
         }
         feed_rows = self.conn.execute(
             """
-            SELECT name, feed_url, last_polled_at, category
+            SELECT
+                name,
+                feed_url,
+                last_polled_at,
+                last_success_at,
+                last_error_at,
+                last_error_message,
+                consecutive_failures,
+                category
             FROM feeds
-            ORDER BY last_polled_at IS NULL, last_polled_at DESC, name
-            LIMIT 25
+            ORDER BY consecutive_failures DESC, last_polled_at IS NULL, last_polled_at DESC, name
+            LIMIT 50
             """
         ).fetchall()
+        recent_jobs = self.list_job_runs(limit=15)
         return {
             "counts": counts,
             "freshness": freshness,
             "jobs": jobs,
             "feeds": [dict(row) for row in feed_rows],
+            "recentJobRuns": recent_jobs,
         }
 
     def upsert_companies(self, companies: Iterable[dict]) -> int:
@@ -276,6 +286,179 @@ class Repository:
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
+    def upsert_company_scores(self, company_id: int, records: Iterable[dict]) -> int:
+        rows = [
+            (
+                company_id,
+                record["period_end"],
+                record.get("dimension", "ARY"),
+                record.get("piotroski_f"),
+                record.get("altman_z"),
+                record.get("beneish_m"),
+                record.get("survivability"),
+                record.get("piotroski_components"),
+                record.get("altman_components"),
+            )
+            for record in records
+        ]
+        if not rows:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO company_scores (
+                company_id, period_end, dimension,
+                piotroski_f, altman_z, beneish_m, survivability,
+                piotroski_components, altman_components, computed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(company_id, period_end, dimension) DO UPDATE SET
+                piotroski_f=excluded.piotroski_f,
+                altman_z=excluded.altman_z,
+                beneish_m=excluded.beneish_m,
+                survivability=excluded.survivability,
+                piotroski_components=excluded.piotroski_components,
+                altman_components=excluded.altman_components,
+                computed_at=CURRENT_TIMESTAMP
+            """,
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def fetch_company_scores(self, company_id: int, dimension: str = "ARY") -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                period_end,
+                dimension,
+                piotroski_f,
+                altman_z,
+                beneish_m,
+                survivability,
+                piotroski_components,
+                altman_components,
+                computed_at
+            FROM company_scores
+            WHERE company_id = ? AND dimension = ?
+            ORDER BY period_end DESC
+            """,
+            (company_id, dimension),
+        ).fetchall()
+        return [self._format_score_row(row) for row in rows]
+
+    def fetch_latest_company_scores(
+        self,
+        tickers: list[str],
+        dimension: str = "ARY",
+    ) -> dict[str, dict]:
+        if not tickers:
+            return {}
+        placeholders = ",".join("?" for _ in tickers)
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                c.ticker,
+                cs.period_end,
+                cs.dimension,
+                cs.piotroski_f,
+                cs.altman_z,
+                cs.beneish_m,
+                cs.survivability,
+                cs.piotroski_components,
+                cs.altman_components,
+                cs.computed_at
+            FROM company_scores cs
+            JOIN companies c ON c.id = cs.company_id
+            WHERE c.ticker IN ({placeholders})
+              AND cs.dimension = ?
+              AND cs.period_end = (
+                  SELECT MAX(cs2.period_end)
+                  FROM company_scores cs2
+                  WHERE cs2.company_id = cs.company_id AND cs2.dimension = cs.dimension
+              )
+            """,
+            [*[t.upper() for t in tickers], dimension],
+        ).fetchall()
+        return {row["ticker"]: self._format_score_row(row) for row in rows}
+
+    @staticmethod
+    def _format_score_row(row: sqlite3.Row) -> dict:
+        import json
+
+        output = {
+            "periodEnd": row["period_end"],
+            "dimension": row["dimension"],
+            "piotroskiF": row["piotroski_f"],
+            "altmanZ": row["altman_z"],
+            "beneishM": row["beneish_m"],
+            "survivability": row["survivability"],
+            "computedAt": row["computed_at"],
+        }
+        if row["piotroski_components"]:
+            try:
+                output["piotroskiComponents"] = json.loads(row["piotroski_components"])
+            except json.JSONDecodeError:
+                output["piotroskiComponents"] = None
+        if row["altman_components"]:
+            try:
+                output["altmanComponents"] = json.loads(row["altman_components"])
+            except json.JSONDecodeError:
+                output["altmanComponents"] = None
+        return output
+
+    def fetch_price_near_date(self, ticker: str, target_date: str) -> float | None:
+        row = self.conn.execute(
+            """
+            SELECT close
+            FROM prices
+            WHERE ticker = ? AND date <= ?
+            ORDER BY date DESC, CASE source WHEN 'stooq' THEN 0 ELSE 1 END
+            LIMIT 1
+            """,
+            (ticker.upper(), target_date[:10]),
+        ).fetchone()
+        return row["close"] if row else None
+
+    def fetch_insider_summary_90d(self, tickers: list[str]) -> list[dict]:
+        if not tickers:
+            return []
+        cutoff = (datetime.now(timezone.utc).date() - timedelta(days=90)).isoformat()
+        placeholders = ",".join("?" for _ in tickers)
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                c.ticker,
+                SUM(CASE WHEN i.transaction_code = 'P' THEN 1 ELSE 0 END) AS buy_count_90d,
+                SUM(CASE WHEN i.transaction_code = 'S' THEN 1 ELSE 0 END) AS sell_count_90d,
+                SUM(CASE WHEN i.transaction_code = 'P' THEN ABS(COALESCE(i.transaction_value, 0)) ELSE 0 END) AS buy_value_90d,
+                SUM(CASE WHEN i.transaction_code = 'S' THEN ABS(COALESCE(i.transaction_value, 0)) ELSE 0 END) AS sell_value_90d
+            FROM insider_transactions i
+            JOIN companies c ON c.id = i.company_id
+            WHERE c.ticker IN ({placeholders})
+              AND i.transaction_code IN ('P', 'S')
+              AND i.transaction_date >= ?
+            GROUP BY c.ticker
+            """,
+            [*[t.upper() for t in tickers], cutoff],
+        ).fetchall()
+        results = []
+        for row in rows:
+            buy_count = row["buy_count_90d"] or 0
+            sell_count = row["sell_count_90d"] or 0
+            buy_value = row["buy_value_90d"] or 0.0
+            sell_value = row["sell_value_90d"] or 0.0
+            ratio = buy_count / sell_count if sell_count else (float(buy_count) if buy_count else None)
+            results.append(
+                {
+                    "ticker": row["ticker"],
+                    "buyCount90d": buy_count,
+                    "sellCount90d": sell_count,
+                    "buySellRatio": ratio,
+                    "totalBuyValue90d": buy_value,
+                    "totalSellValue90d": sell_value,
+                }
+            )
+        return results
+
     def upsert_feed(self, feed: dict) -> int:
         cursor = self.conn.execute(
             """
@@ -306,6 +489,89 @@ class Repository:
         feed_id = cursor.fetchone()[0]
         self.conn.commit()
         return feed_id
+
+    def record_feed_poll(self, feed_id: int, *, success: bool, error_message: str | None = None) -> None:
+        now = utc_now_iso()
+        if success:
+            self.conn.execute(
+                """
+                UPDATE feeds
+                SET last_success_at = ?,
+                    last_error_at = NULL,
+                    last_error_message = NULL,
+                    consecutive_failures = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (now, feed_id),
+            )
+        else:
+            self.conn.execute(
+                """
+                UPDATE feeds
+                SET last_error_at = ?,
+                    last_error_message = ?,
+                    consecutive_failures = COALESCE(consecutive_failures, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (now, (error_message or "unknown error")[:500], feed_id),
+            )
+        self.conn.commit()
+
+    def list_job_runs(self, *, limit: int = 25) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                jr.id,
+                jr.job_id,
+                j.job_type,
+                jr.started_at,
+                jr.finished_at,
+                jr.status,
+                jr.error_message
+            FROM job_runs jr
+            JOIN ingestion_jobs j ON j.id = jr.job_id
+            ORDER BY jr.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_article_ticker_matches(self, article_ids: list[int]) -> dict[int, list[dict]]:
+        if not article_ids:
+            return {}
+        display_clause, display_params = _news_display_match_clause("ac")
+        placeholders = ",".join("?" for _ in article_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                ac.article_id,
+                c.ticker,
+                ac.match_strategy,
+                ac.confidence,
+                ac.extraction_stage
+            FROM article_company ac
+            JOIN companies c ON c.id = ac.company_id
+            WHERE ac.article_id IN ({placeholders})
+              AND ac.confidence >= 0.85
+              AND {display_clause}
+            ORDER BY ac.article_id, ac.confidence DESC, c.ticker
+            """,
+            [*article_ids, *display_params],
+        ).fetchall()
+        matches: dict[int, list[dict]] = {}
+        for row in rows:
+            matches.setdefault(row["article_id"], []).append(
+                {
+                    "ticker": row["ticker"],
+                    "matchStrategy": row["match_strategy"],
+                    "confidence": round(float(row["confidence"]), 4),
+                    "extractionStage": row["extraction_stage"],
+                }
+            )
+        return matches
 
     def find_duplicate_title(self, title: str, threshold: int = 90, lookback: int = 500) -> int | None:
         if fuzz is None:
@@ -458,6 +724,11 @@ class Repository:
         )
         duplicate_id = article.get("duplicate_of_article_id")
         if duplicate_id is None and not skip_dedup:
+            existing_row = self.conn.execute(
+                "SELECT id FROM articles WHERE url_hash = ?",
+                (article["url_hash"],),
+            ).fetchone()
+            existing_id = existing_row["id"] if existing_row else None
             match = self.conn.execute(
                 """
                 SELECT id FROM articles
@@ -466,13 +737,15 @@ class Repository:
                 """,
                 (fingerprint,),
             ).fetchone()
-            if match:
+            if match and match["id"] != existing_id:
                 duplicate_id = match["id"]
             else:
-                duplicate_id = self.find_duplicate_article(
+                found = self.find_duplicate_article(
                     article["title"],
                     article.get("summary"),
                 )
+                if found and found != existing_id:
+                    duplicate_id = found
         cursor = self.conn.execute(
             """
             INSERT INTO articles (
@@ -853,11 +1126,15 @@ class Repository:
             """,
             [*params, *ac_display_params, limit, offset],
         ).fetchall()
+        article_ids = [row["id"] for row in rows]
+        match_index = self.get_article_ticker_matches(article_ids)
         articles = []
         for row in rows:
-            tickers = [ticker for ticker in (row["tickers"] or "").split(",") if ticker]
+            ticker_matches = match_index.get(row["id"], [])
+            tickers = [match["ticker"] for match in ticker_matches]
             if len(tickers) > 6:
                 tickers = tickers[:6]
+                ticker_matches = ticker_matches[:6]
             articles.append(
                 {
                     "id": row["id"],
@@ -874,6 +1151,7 @@ class Repository:
                     "rankScore": row["rank_score"],
                     "topicCluster": row["topic_cluster_id"],
                     "tickers": tickers,
+                    "tickerMatches": ticker_matches,
                 }
             )
         return {"articles": articles, "total": total, "limit": limit, "offset": offset}
@@ -889,22 +1167,30 @@ class Repository:
                 AND {display_clause}
             JOIN companies c ON c.id = ac.company_id
             WHERE c.ticker = ?
+              AND a.duplicate_of_article_id IS NULL
             ORDER BY a.published_at DESC, a.id DESC
             LIMIT ?
             """,
             [*display_params, ticker.upper(), limit],
         ).fetchall()
-        return [
-            {
-                "id": row["id"],
-                "title": row["title"],
-                "description": row["summary"] or row["body_text"],
-                "url": row["canonical_url"],
-                "publishedDate": row["published_at"],
-                "sourceDomain": row["source_domain"],
-            }
-            for row in rows
-        ]
+        article_ids = [row["id"] for row in rows]
+        match_index = self.get_article_ticker_matches(article_ids)
+        output = []
+        for row in rows:
+            ticker_matches = match_index.get(row["id"], [])
+            output.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "description": row["summary"] or row["body_text"],
+                    "url": row["canonical_url"],
+                    "publishedDate": row["published_at"],
+                    "sourceDomain": row["source_domain"],
+                    "tickers": [match["ticker"] for match in ticker_matches],
+                    "tickerMatches": ticker_matches,
+                }
+            )
+        return output
 
     def get_cached_http_response(self, cache_key: str) -> dict | None:
         row = self.conn.execute(

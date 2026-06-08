@@ -1,7 +1,16 @@
 from __future__ import annotations
 
-from app.services.fundamentals import pivot_fundamentals_rows
+from app.services.fundamentals import pivot_fundamentals_rows, resolve_financial_dimension
 from app.services.sec import normalize_company_facts
+
+
+def test_resolve_financial_dimension_maps_sharadar_codes():
+    assert resolve_financial_dimension("MRY", False)["storage_dimension"] == "ARY"
+    assert resolve_financial_dimension("MRY", False)["most_recent"] is True
+    assert resolve_financial_dimension("MRQ", False)["storage_dimension"] == "ARQ"
+    assert resolve_financial_dimension("ART", False)["ttm_only"] is True
+    assert resolve_financial_dimension("MRT", False)["most_recent"] is True
+    assert resolve_financial_dimension("MRT", False)["ttm_only"] is True
 
 
 def test_normalize_company_facts_maps_us_gaap_shares_outstanding():
@@ -200,6 +209,75 @@ def test_get_financials_most_recent_prefers_annual_rows():
     assert wide["calendardate"] == "2025-12-31"
     assert wide["dimension"] == "ARY"
     assert wide["revenue"] == 100.0
+
+
+def test_refresh_fundamentals_continues_after_sec_404():
+    import requests
+    from app.services.fundamentals import FundamentalsService
+
+    class FakeRepo:
+        def __init__(self) -> None:
+            self.fundamentals: list[dict] = []
+
+        def get_company_by_ticker(self, ticker: str):
+            companies = {
+                "GOOD": {"id": 1, "ticker": "GOOD", "cik": "0000000001"},
+                "BAD": {"id": 2, "ticker": "BAD", "cik": "0000000002"},
+            }
+            return companies.get(ticker.upper())
+
+        def upsert_fundamentals(self, records):
+            self.fundamentals.extend(records)
+            return len(records)
+
+        def update_company_metadata(self, ticker, meta):
+            return None
+
+    class FakeSecClient:
+        def fetch_company_facts(self, cik: str) -> dict:
+            if cik.endswith("0002"):
+                response = requests.Response()
+                response.status_code = 404
+                raise requests.HTTPError("404", response=response)
+            return {"facts": {"us-gaap": {}, "dei": {}}}
+
+        def fetch_submissions(self, cik: str) -> dict:
+            return {"filings": {"recent": {}}}
+
+    payload = FundamentalsService(FakeRepo(), FakeSecClient()).refresh_fundamentals(["GOOD", "BAD"])
+    assert payload["tickers"] == ["GOOD"]
+    assert len(payload["errors"]) == 0
+    assert len(payload["skipped"]) == 1
+    assert payload["skipped"][0]["ticker"] == "BAD"
+    assert payload["skipped"][0]["reason"] == "no_sec_companyfacts"
+
+
+def test_refresh_fundamentals_skips_etf_before_sec_call():
+    from app.services.fundamentals import FundamentalsService
+
+    class FakeRepo:
+        def get_company_by_ticker(self, ticker: str):
+            return {
+                "id": 9,
+                "ticker": "QQQ",
+                "name": "INVESCO QQQ TRUST, SERIES 1",
+                "cik": "0001067839",
+            }
+
+        def upsert_fundamentals(self, records):
+            raise AssertionError("SEC should not be called for ETF")
+
+        def update_company_metadata(self, ticker, meta):
+            return None
+
+    class FailingSecClient:
+        def fetch_company_facts(self, cik: str) -> dict:
+            raise AssertionError("SEC should not be called for ETF")
+
+    payload = FundamentalsService(FakeRepo(), FailingSecClient()).refresh_fundamentals(["QQQ"])
+    assert payload["tickers"] == []
+    assert payload["skipped"] == [{"ticker": "QQQ", "reason": "index_etf"}]
+    assert payload["errors"] == []
 
 
 def test_pivot_fundamentals_rows_aligns_shares_to_statement_period():

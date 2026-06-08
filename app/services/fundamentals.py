@@ -4,9 +4,13 @@ import logging
 import time
 from collections import defaultdict
 
+import requests
+
 from ..repositories import Repository
 from .company_enrichment import metadata_from_submissions
+from .scoring import compute_scores_for_periods, scores_to_json
 from .sec import normalize_company_facts
+from .sec_eligibility import sec_http_outcome, should_skip_sec_fundamentals
 
 logger = logging.getLogger("stock_tracker.pipeline.fundamentals")
 
@@ -199,6 +203,62 @@ def pivot_fundamentals_rows(rows: list[dict]) -> list[dict]:
     )
 
 
+def resolve_financial_dimension(
+    dimension: str | None,
+    most_recent: bool,
+) -> dict[str, object]:
+    """Map SHARADAR-style dimension codes to SQLite query behavior."""
+    if not dimension:
+        return {
+            "storage_dimension": None,
+            "ttm_only": False,
+            "include_ttm": False,
+            "most_recent": most_recent,
+        }
+    code = dimension.upper()
+    if code in {"ARY", "ARQ"}:
+        return {
+            "storage_dimension": code,
+            "ttm_only": False,
+            "include_ttm": False,
+            "most_recent": most_recent,
+        }
+    if code == "MRY":
+        return {
+            "storage_dimension": "ARY",
+            "ttm_only": False,
+            "include_ttm": False,
+            "most_recent": True,
+        }
+    if code == "MRQ":
+        return {
+            "storage_dimension": "ARQ",
+            "ttm_only": False,
+            "include_ttm": False,
+            "most_recent": True,
+        }
+    if code in {"TTM", "ART"}:
+        return {
+            "storage_dimension": None,
+            "ttm_only": True,
+            "include_ttm": True,
+            "most_recent": False,
+        }
+    if code == "MRT":
+        return {
+            "storage_dimension": None,
+            "ttm_only": True,
+            "include_ttm": True,
+            "most_recent": True,
+        }
+    return {
+        "storage_dimension": code,
+        "ttm_only": False,
+        "include_ttm": False,
+        "most_recent": most_recent,
+    }
+
+
 BALANCE_SHEET_METRICS = frozenset(
     {
         "assets", "assetscurrent", "liabilities", "liabilitiescurrent", "equity",
@@ -389,16 +449,64 @@ class FundamentalsService:
         t0 = time.monotonic()
         inserted = 0
         refreshed = []
+        skipped: list[dict] = []
+        errors: list[dict] = []
         for ticker in [ticker.upper() for ticker in tickers if ticker]:
             company = self.repo.get_company_by_ticker(ticker)
             if not company or not company.get("cik"):
                 logger.debug("refresh_fundamentals skip ticker=%s (no CIK)", ticker)
+                skipped.append({"ticker": ticker, "reason": "no_cik"})
                 continue
-            payload = self.sec_client.fetch_company_facts(company["cik"])
+            skip_reason = should_skip_sec_fundamentals(company)
+            if skip_reason:
+                logger.debug("refresh_fundamentals skip ticker=%s (%s)", ticker, skip_reason)
+                skipped.append({"ticker": ticker, "reason": skip_reason})
+                continue
+            try:
+                payload = self.sec_client.fetch_company_facts(company["cik"])
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if sec_http_outcome(status) == "skip":
+                    logger.debug(
+                        "refresh_fundamentals skip ticker=%s cik=%s (SEC HTTP %s)",
+                        ticker,
+                        company["cik"],
+                        status,
+                    )
+                    skipped.append(
+                        {
+                            "ticker": ticker,
+                            "reason": "no_sec_companyfacts",
+                            "status": status,
+                        }
+                    )
+                    continue
+                logger.warning(
+                    "refresh_fundamentals ticker=%s cik=%s SEC HTTP %s",
+                    ticker,
+                    company["cik"],
+                    status,
+                )
+                errors.append(
+                    {
+                        "ticker": ticker,
+                        "reason": "sec_http_error",
+                        "status": status,
+                        "message": str(exc),
+                    }
+                )
+                continue
+            except requests.RequestException as exc:
+                logger.warning("refresh_fundamentals ticker=%s request failed: %s", ticker, exc)
+                errors.append(
+                    {"ticker": ticker, "reason": "sec_request_error", "message": str(exc)}
+                )
+                continue
             records = normalize_company_facts(company["id"], payload)
             count = self.repo.upsert_fundamentals(records)
             inserted += count
             logger.debug("refresh_fundamentals ticker=%s records=%d", ticker, count)
+            self._refresh_company_scores(company["id"], ticker)
             try:
                 submissions = self.sec_client.fetch_submissions(company["cik"])
                 meta = metadata_from_submissions(submissions)
@@ -407,9 +515,48 @@ class FundamentalsService:
                 pass
             refreshed.append(ticker)
         elapsed = time.monotonic() - t0
-        logger.info("refresh_fundamentals done tickers=%d records=%d elapsed=%.1fs",
-                    len(refreshed), inserted, elapsed)
-        return {"tickers": refreshed, "recordsWritten": inserted}
+        logger.info(
+            "refresh_fundamentals done tickers=%d skipped=%d errors=%d records=%d elapsed=%.1fs",
+            len(refreshed),
+            len(skipped),
+            len(errors),
+            inserted,
+            elapsed,
+        )
+        return {
+            "tickers": refreshed,
+            "recordsWritten": inserted,
+            "skipped": skipped,
+            "errors": errors,
+        }
+
+    def _refresh_company_scores(self, company_id: int, ticker: str) -> int:
+        rows = self.repo.fetch_fundamentals_rows([ticker], dimension="ARY")
+        annual_rows = pivot_fundamentals_rows(rows)
+        if not annual_rows:
+            return 0
+        prices_by_period: dict[str, float | None] = {}
+        for row in annual_rows:
+            period_end = row.get("calendardate")
+            if period_end:
+                prices_by_period[period_end] = self.repo.fetch_price_near_date(ticker, period_end)
+        score_records = compute_scores_for_periods(annual_rows, prices_by_period=prices_by_period)
+        db_records = [
+            {
+                "period_end": record["period_end"],
+                "dimension": record["dimension"],
+                "piotroski_f": record["piotroski_f"],
+                "altman_z": record["altman_z"],
+                "beneish_m": record["beneish_m"],
+                "survivability": record["survivability"],
+                "piotroski_components": scores_to_json(record["piotroski_components"]),
+                "altman_components": scores_to_json(record["altman_components"]),
+            }
+            for record in score_records
+        ]
+        written = self.repo.upsert_company_scores(company_id, db_records)
+        logger.debug("refresh_company_scores ticker=%s periods=%d", ticker, written)
+        return written
 
     def enrich_company_metadata(self, tickers: list[str]) -> dict:
         logger.info("enrich_company_metadata start tickers=%d", len(tickers))
@@ -433,25 +580,39 @@ class FundamentalsService:
         return {"enriched": len(enriched), "tickers": enriched}
 
     def get_financials_payload(self, tickers: list[str], gte: str | None, dimension: str | None, most_recent: bool) -> dict:
-        rows = self.repo.fetch_fundamentals_rows(tickers, gte=gte, dimension=dimension)
+        resolved = resolve_financial_dimension(dimension, most_recent)
+        storage_dimension = resolved["storage_dimension"]
+        ttm_only = bool(resolved["ttm_only"])
+        include_ttm = bool(resolved["include_ttm"])
+        use_most_recent = bool(resolved["most_recent"])
+
+        rows = self.repo.fetch_fundamentals_rows(
+            tickers,
+            gte=gte,
+            dimension=storage_dimension if isinstance(storage_dimension, str) else None,
+        )
         wide_rows = pivot_fundamentals_rows(rows)
 
-        if dimension == "TTM" or (not dimension and not most_recent):
+        if include_ttm or (not dimension and not use_most_recent):
             ttm_rows = compute_ttm_rows(wide_rows)
-            if dimension == "TTM":
+            if ttm_only:
                 wide_rows = ttm_rows
+            elif include_ttm:
+                wide_rows = ttm_rows + wide_rows
             else:
                 wide_rows = ttm_rows + wide_rows
 
-        if most_recent:
+        if use_most_recent:
             candidates = wide_rows
-            if not dimension:
+            if not storage_dimension and not ttm_only:
                 annual_rows = [row for row in wide_rows if row.get("dimension") == "ARY"]
                 if annual_rows:
                     candidates = annual_rows
-            latest_by_ticker = {}
+            latest_by_ticker: dict[str, dict] = {}
             for row in candidates:
-                latest_by_ticker.setdefault(row["ticker"], row)
+                current = latest_by_ticker.get(row["ticker"])
+                if current is None or (row.get("calendardate") or "") > (current.get("calendardate") or ""):
+                    latest_by_ticker[row["ticker"]] = row
             wide_rows = list(latest_by_ticker.values())
 
         prices_by_ticker: dict[str, float] = {}
