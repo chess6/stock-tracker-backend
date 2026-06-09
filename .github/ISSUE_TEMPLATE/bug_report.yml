@@ -1,0 +1,56 @@
+name: Bug report
+description: Report incorrect behavior, crashes, or data issues
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Redact API keys, `.env` contents, and personal emails from logs.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear description of the bug.
+      placeholder: Admin bootstrap fails when refreshing fundamentals for TICKER…
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start API with `sh start.sh`
+        2. `curl -X POST http://localhost:5000/api/admin/...`
+        3. See error…
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      placeholder: master @ abc1234
+  - type: dropdown
+    id: component
+    attributes:
+      label: Area
+      options:
+        - API routes
+        - Fundamentals / SEC ingestion
+        - News / RSS / entity linking
+        - Prices
+        - Insiders
+        - Worker / job queue
+        - Tests / CI
+        - Other

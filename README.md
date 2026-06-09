@@ -1,6 +1,14 @@
 # Stock Tracker Backend
 
-Flask API and SQLite cache for the Stock Tracker app. Ingests **SEC EDGAR** fundamentals, **Stooq/yfinance** prices, **RSS** news, and optional **Nasdaq Data Link** fallback. Pairs with the [frontend repo](https://github.com/chess6/stock-tracker-frontend).
+[![License](https://img.shields.io/github/license/chess6/stock-tracker-backend)](LICENSE)
+
+Local-first Flask API and SQLite cache for a **deep-value research workstation**. Ingests **SEC EDGAR** fundamentals, **Stooq/yfinance** prices, **RSS** news with entity linking, and optional **Nasdaq Data Link** fallback. Pairs with the [frontend repo](https://github.com/chess6/stock-tracker-frontend).
+
+| | |
+|---|---|
+| [Contributing](CONTRIBUTING.md) | Setup, tests, PR guidelines |
+| [Security](SECURITY.md) | Report vulnerabilities privately |
+| [Code of Conduct](CODE_OF_CONDUCT.md) | Community standards |
 
 ## Architecture
 
@@ -59,15 +67,10 @@ Optional env: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `REDIS_URL`, `AI_DEFAULT_PR
 pip install -r requirements.txt
 ```
 
-Create `.env`:
+Create `.env` from the example file:
 
-```env
-SEC_USER_AGENT=you@example.com
-# Optional:
-# NASDAQ_API_KEY=your_key
-# STOCK_TRACKER_DB_PATH=/path/to/stock_tracker.sqlite3
-# STOCK_TRACKER_DEFAULT_TICKERS=JPM,MCD,AAPL
-# STOCK_TRACKER_REQUEST_TIMEOUT=20
+```bash
+cp .env.example .env   # then edit SEC_USER_AGENT
 ```
 
 ## Run & stop
@@ -217,4 +220,4 @@ python -m pytest app/tests/ -q
 
 ## License
 
-MIT
+[Apache License 2.0](LICENSE)
