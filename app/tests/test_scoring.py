@@ -637,3 +637,51 @@ def test_research_insider_routes(app, client):
     cluster_payload = clusters.get_json()
     assert len(cluster_payload["clusters"]) >= 1
     assert cluster_payload["clusters"][0]["ticker"] == "GME"
+
+
+def test_upsert_insider_cluster_analysis_replaces_stale_rows(app):
+    from datetime import date, timedelta
+
+    today = date.today()
+    window_start = (today - timedelta(days=29)).isoformat()
+    window_end = today.isoformat()
+
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "CLST", "name": "Cluster Test", "cik": "0000000001"}])
+        company = repo.get_company_by_ticker("CLST")
+        repo.upsert_insider_cluster_analysis(
+            company["id"],
+            [
+                {
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "buy_count": 3,
+                    "sell_count": 0,
+                    "unique_buyers": 3,
+                    "total_buy_value": 0.0,
+                    "total_sell_value": 0.0,
+                    "avg_buy_price": None,
+                    "intensity_score": 0.0,
+                },
+            ],
+        )
+        repo.upsert_insider_cluster_analysis(
+            company["id"],
+            [
+                {
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "buy_count": 3,
+                    "sell_count": 0,
+                    "unique_buyers": 3,
+                    "total_buy_value": 150000.0,
+                    "total_sell_value": 0.0,
+                    "avg_buy_price": 10.0,
+                    "intensity_score": 0.8,
+                },
+            ],
+        )
+        rows = repo.fetch_insider_cluster_rankings(["CLST"], limit=10)
+        assert len(rows) == 1
+        assert rows[0]["totalBuyValue"] == 150000.0

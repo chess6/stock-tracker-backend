@@ -51,7 +51,67 @@ def test_detect_clusters_requires_three_unique_buyers():
     clusters = detect_clusters(txns, as_of=today)
     assert len(clusters) >= 1
     assert clusters[0]["uniqueBuyers"] >= 3
+    assert clusters[0]["totalBuyValue"] > 0
     assert clusters[0]["isCluster"] is True
+
+
+def test_detect_clusters_ignores_award_grants_without_dollar_value():
+    today = date.today()
+    txns = [
+        {
+            "owner_name": "Alice",
+            "transaction_code": "A",
+            "transaction_date": (today - timedelta(days=5)).isoformat(),
+            "transaction_value": 0.0,
+            "price_per_share": 0.0,
+        },
+        {
+            "owner_name": "Bob",
+            "transaction_code": "A",
+            "transaction_date": (today - timedelta(days=3)).isoformat(),
+            "transaction_value": 0.0,
+            "price_per_share": 0.0,
+        },
+        {
+            "owner_name": "Carol",
+            "transaction_code": "A",
+            "transaction_date": (today - timedelta(days=1)).isoformat(),
+            "transaction_value": 0.0,
+            "price_per_share": 0.0,
+        },
+    ]
+    assert detect_clusters(txns, as_of=today) == []
+
+
+def test_detect_clusters_ignores_open_market_buys_without_dollar_value():
+    today = date.today()
+    txns = [
+        {
+            "owner_name": "Alice",
+            "transaction_code": "P",
+            "transaction_date": (today - timedelta(days=5)).isoformat(),
+            "shares": 1000,
+            "price_per_share": None,
+            "transaction_value": None,
+        },
+        {
+            "owner_name": "Bob",
+            "transaction_code": "P",
+            "transaction_date": (today - timedelta(days=3)).isoformat(),
+            "shares": 500,
+            "price_per_share": None,
+            "transaction_value": None,
+        },
+        {
+            "owner_name": "Carol",
+            "transaction_code": "P",
+            "transaction_date": (today - timedelta(days=1)).isoformat(),
+            "shares": 800,
+            "price_per_share": None,
+            "transaction_value": None,
+        },
+    ]
+    assert detect_clusters(txns, as_of=today) == []
 
 
 def test_detect_clusters_ignores_sparse_buying():

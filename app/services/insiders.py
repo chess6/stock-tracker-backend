@@ -73,11 +73,12 @@ class InsidersService:
             total_sec_requests += requests_made
             if transactions:
                 records_written += self.repo.upsert_insider_transactions(company["id"], transactions)
-                raw = self.repo.fetch_insider_transactions_raw(company["id"])
-                cluster_records = cluster_records_for_storage(company["id"], raw)
-                self.repo.upsert_insider_cluster_analysis(company["id"], cluster_records)
+            raw = self.repo.fetch_insider_transactions_raw(company["id"])
+            cluster_records = cluster_records_for_storage(company["id"], raw)
+            self.repo.upsert_insider_cluster_analysis(company["id"], cluster_records)
+            if transactions:
                 logger.debug("refresh_insiders ticker=%s transactions=%d", ticker, len(transactions))
-                refreshed.append(ticker)
+            refreshed.append(ticker)
         if total_sec_requests > 200:
             logger.warning(
                 "refresh_insiders high request count: %d SEC requests across %d tickers",

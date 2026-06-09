@@ -563,11 +563,12 @@ class Repository:
             )
             for record in records
         ]
+        # Replace all materialized windows for this company (avoids stale rows after rule changes).
+        self.conn.execute(
+            "DELETE FROM insider_cluster_analysis WHERE company_id = ?",
+            (company_id,),
+        )
         if not rows:
-            self.conn.execute(
-                "DELETE FROM insider_cluster_analysis WHERE company_id = ?",
-                (company_id,),
-            )
             self.conn.commit()
             return 0
         self.conn.executemany(
@@ -609,6 +610,7 @@ class Repository:
                 computed_at
             FROM insider_cluster_analysis
             WHERE company_id = ?
+              AND COALESCE(total_buy_value, 0) > 0
             ORDER BY intensity_score DESC, window_start DESC
             LIMIT ?
             """,
@@ -654,6 +656,7 @@ class Repository:
             JOIN companies c ON c.id = ica.company_id
             WHERE ica.unique_buyers >= ?
               AND ica.intensity_score IS NOT NULL
+              AND COALESCE(ica.total_buy_value, 0) > 0
               {ticker_filter}
               {value_filter}
             ORDER BY ica.intensity_score DESC, ica.total_buy_value DESC
@@ -1277,9 +1280,12 @@ class Repository:
         clauses = ["a.duplicate_of_article_id IS NULL"]
         params: list = []
         if q:
-            clauses.append("(LOWER(a.title) LIKE ? OR LOWER(COALESCE(a.summary, '')) LIKE ?)")
+            clauses.append(
+                "(LOWER(a.title) LIKE ? OR LOWER(COALESCE(a.summary, '')) LIKE ?"
+                " OR LOWER(COALESCE(a.body_text, '')) LIKE ?)"
+            )
             needle = f"%{q.lower().strip()}%"
-            params.extend([needle, needle])
+            params.extend([needle, needle, needle])
         if source_domain:
             clauses.append("LOWER(a.source_domain) LIKE ?")
             params.append(f"%{source_domain.lower().strip()}%")
@@ -1350,7 +1356,8 @@ class Repository:
             ORDER BY COALESCE(a.rank_score, 0) DESC, a.published_at DESC, a.id DESC
             LIMIT ? OFFSET ?
             """,
-            [*params, *ac_display_params, limit, offset],
+            # JOIN display-strategy placeholders precede WHERE params in the SQL text.
+            [*ac_display_params, *params, limit, offset],
         ).fetchall()
         article_ids = [row["id"] for row in rows]
         match_index = self.get_article_ticker_matches(article_ids)

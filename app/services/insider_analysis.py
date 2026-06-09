@@ -9,6 +9,8 @@ logger = logging.getLogger("stock_tracker.insider_analysis")
 
 BUY_CODES = frozenset({"P", "A"})
 SELL_CODES = frozenset({"S", "D"})
+# Open-market purchases only; awards (A) often report $0 and are excluded from clusters.
+CLUSTER_BUY_CODES = frozenset({"P"})
 CLUSTER_WINDOW_DAYS = 30
 CLUSTER_MIN_UNIQUE_BUYERS = 3
 
@@ -32,6 +34,13 @@ def is_buy_transaction(code: str | None) -> bool:
 
 def is_sell_transaction(code: str | None) -> bool:
     return (code or "").upper() in SELL_CODES
+
+
+def is_cluster_buy_transaction(txn: dict) -> bool:
+    """Open-market purchase with a positive dollar value (cluster screener semantics)."""
+    if (txn.get("transaction_code") or "").upper() not in CLUSTER_BUY_CODES:
+        return False
+    return transaction_value(txn) > 0
 
 
 def transaction_value(txn: dict) -> float:
@@ -109,7 +118,7 @@ def detect_clusters(
     buy_events: list[tuple[date, dict]] = []
 
     for txn in transactions:
-        if not is_buy_transaction(txn.get("transaction_code")):
+        if not is_cluster_buy_transaction(txn):
             continue
         txn_date = _parse_date(txn.get("transaction_date") or txn.get("filing_date"))
         if txn_date is None or txn_date < lookback_start or txn_date > end:

@@ -135,6 +135,44 @@ def test_news_feed_returns_unique_articles(app, client):
     assert payload["articles"][0]["tickerMatches"][0]["confidence"] == 0.96
 
 
+def test_news_feed_search_returns_matching_articles(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_article(
+            {
+                "canonical_url": "https://example.com/nvidia-story",
+                "url_hash": "hash-nvidia",
+                "title": "NVIDIA beats earnings expectations",
+                "summary": "Chip demand remains strong",
+                "source_domain": "reuters.com",
+                "published_at": "2025-06-01T12:00:00Z",
+                "fetched_at": "2025-06-01T12:05:00Z",
+                "content_hash": "content-nv",
+                "raw_source": "test",
+            }
+        )
+        repo.upsert_article(
+            {
+                "canonical_url": "https://example.com/apple-story",
+                "url_hash": "hash-apple",
+                "title": "Apple launches new hardware",
+                "summary": "Consumer product refresh",
+                "source_domain": "bbc.co.uk",
+                "published_at": "2025-06-02T12:00:00Z",
+                "fetched_at": "2025-06-02T12:05:00Z",
+                "content_hash": "content-ap",
+                "raw_source": "test",
+            }
+        )
+
+    response = client.get("/api/news?limit=10&q=nvidia")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 1
+    assert len(payload["articles"]) == 1
+    assert "NVIDIA" in payload["articles"][0]["title"]
+
+
 def test_preferences_round_trip(app, client):
     response = client.get("/api/preferences")
     assert response.status_code == 200
