@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Keys are article URL hostnames (not product branding); values are relative source-quality weights.
 SOURCE_QUALITY: dict[str, float] = {
     "reuters.com": 1.0,
     "bloomberg.com": 1.0,

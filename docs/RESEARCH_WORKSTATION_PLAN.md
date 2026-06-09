@@ -1,6 +1,6 @@
 ---
 name: Deep Value Research Page
-overview: Architecture and phased implementation plan for a high-density deep value research page — a spreadsheet-like financial analysis interface with scoring models (Piotroski, Altman, Beneish), insider cluster tracking, narrative correlation, and Bloomberg-terminal density.
+overview: Architecture and phased implementation plan for a high-density deep value research page — a spreadsheet-like financial analysis interface with scoring models (Piotroski, Altman, Beneish), insider cluster tracking, narrative correlation, and terminal-grade information density.
 todos:
   - id: phase1-scoring
     content: "Phase 1: Backend scoring engine (Piotroski, Altman, Beneish, survivability) + company_scores table + research API endpoints"
@@ -25,7 +25,7 @@ isProject: false
 ## Current State Summary
 
 **Backend data already available:**
-- 45+ SEC fundamental metrics per company-period (revenue through sbcomp), pivoted into SHARADAR-style wide rows with annual/quarterly/TTM support
+- 45+ SEC fundamental metrics per company-period (revenue through sbcomp), pivoted into wide-row period layout with annual/quarterly/TTM support
 - 20+ derived ratios in `build_company_metrics()`: P/E, EV/EBITDA, ROE, ROA, gross margin, net margin, D/E, current ratio, P/B, P/S, FCF/share, div yield, etc.
 - Insider transactions from SEC Form 4: owner_name, transaction_code (P/S/A/D/…), shares, price, value, filing_date, transaction_date
 - Price history (Stooq/yfinance): OHLCV per ticker per date

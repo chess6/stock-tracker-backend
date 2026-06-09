@@ -8,7 +8,7 @@ from app.services.fundamentals import (
 from app.services.sec import normalize_company_facts
 
 
-def test_resolve_financial_dimension_maps_sharadar_codes():
+def test_resolve_financial_dimension_maps_legacy_codes():
     assert resolve_financial_dimension("MRY", False)["storage_dimension"] == "MRY"
     assert resolve_financial_dimension("MRY", False)["legacy_storage_dimension"] == "ARY"
     assert resolve_financial_dimension("MRQ", False)["storage_dimension"] == "MRQ"

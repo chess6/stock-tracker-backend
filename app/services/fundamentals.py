@@ -132,7 +132,7 @@ def collapse_narrow_fundamentals_rows(rows: list[dict], *, annual: bool) -> list
 
 
 def pivot_fundamentals_rows(rows: list[dict]) -> list[dict]:
-    """Pivot narrow fundamentals into SHARADAR-style wide rows.
+    """Pivot narrow fundamentals into wide-row period layout.
 
     SEC CompanyFacts uses different period_end dates for shares (DEI snapshot)
     vs statement line items. Group statement metrics by period_end, then attach
@@ -250,7 +250,7 @@ def resolve_financial_dimension(
     dimension: str | None,
     most_recent: bool,
 ) -> dict[str, object]:
-    """Map SHARADAR-style dimension codes to SQLite query behavior."""
+    """Map legacy dimension codes (MRY, ARY, MRQ, …) to SQLite query behavior."""
     if not dimension:
         return {
             "storage_dimension": None,

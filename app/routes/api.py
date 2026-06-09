@@ -232,7 +232,7 @@ def insiders_buying_sums():
     return jsonify({"rows": rows, "meta": {"source": source}})
 
 
-# legacy URL: /sf2 keeps SHARADAR-compatible datatable shape for existing clients.
+# legacy URL: /sf2 keeps vendor-compatible datatable shape for existing clients.
 # Planned alias: /ticker/<ticker>/insiders (same handler) once frontend fully migrates.
 @api_bp.route("/ticker/<ticker>/sf2", methods=["GET"])
 def ticker_sf2(ticker: str):

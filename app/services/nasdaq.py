@@ -10,6 +10,7 @@ class NasdaqService:
         self.api_key = api_key
         self.timeout = timeout
         self.session = session or requests.Session()
+        # Vendor API path (Nasdaq Data Link datatable namespace).
         self.base_url = "https://data.nasdaq.com/api/v3/datatables/SHARADAR"
 
     def is_enabled(self) -> bool:
