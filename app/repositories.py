@@ -43,10 +43,23 @@ class Repository:
             "companiesUpdatedAt": self.conn.execute("SELECT MAX(updated_at) FROM companies").fetchone()[0],
             "feedsLastPolledAt": self.conn.execute("SELECT MAX(last_polled_at) FROM feeds").fetchone()[0],
             "fundamentalsUpdatedAt": self.conn.execute("SELECT MAX(updated_at) FROM fundamentals").fetchone()[0],
+            "companyScoresUpdatedAt": self.conn.execute("SELECT MAX(computed_at) FROM company_scores").fetchone()[0],
             "latestArticlePublishedAt": self.conn.execute("SELECT MAX(published_at) FROM articles").fetchone()[0],
             "latestArticleFetchedAt": self.conn.execute("SELECT MAX(fetched_at) FROM articles").fetchone()[0],
             "pricesUpdatedAt": self.conn.execute("SELECT MAX(created_at) FROM prices").fetchone()[0],
             "insidersUpdatedAt": self.conn.execute("SELECT MAX(created_at) FROM insider_transactions").fetchone()[0],
+            "insiderClustersUpdatedAt": self.conn.execute(
+                "SELECT MAX(computed_at) FROM insider_cluster_analysis"
+            ).fetchone()[0],
+        }
+        coverage = {
+            "companiesMissingMetadata": self.count_companies_missing_metadata(),
+            "articlesWithMarketReactions": self.conn.execute(
+                "SELECT COUNT(DISTINCT article_id) FROM article_market_reactions"
+            ).fetchone()[0],
+            "linkedArticles": self.conn.execute(
+                "SELECT COUNT(DISTINCT article_id) FROM article_company"
+            ).fetchone()[0],
         }
         jobs = {
             "queued": self.conn.execute("SELECT COUNT(*) FROM ingestion_jobs WHERE status='queued'").fetchone()[0],
@@ -73,6 +86,7 @@ class Repository:
         return {
             "counts": counts,
             "freshness": freshness,
+            "coverage": coverage,
             "jobs": jobs,
             "feeds": [dict(row) for row in feed_rows],
             "recentJobRuns": recent_jobs,
@@ -195,6 +209,44 @@ class Repository:
             GROUP BY ticker
             HAVING MAX(date) >= date('now', '-14 days')
             ORDER BY MAX(date) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [row["ticker"] for row in rows]
+
+    def delete_fundamentals_snapshots(self, company_id: int, dimensions: Iterable[str]) -> int:
+        dims = [item for item in dimensions if item]
+        if not dims:
+            return 0
+        placeholders = ",".join("?" for _ in dims)
+        cursor = self.conn.execute(
+            f"""
+            DELETE FROM fundamentals
+            WHERE company_id = ? AND dimension IN ({placeholders})
+            """,
+            [company_id, *dims],
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
+    def count_companies_missing_metadata(self) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) FROM companies
+            WHERE cik IS NOT NULL AND cik != ''
+              AND (sector IS NULL OR TRIM(sector) = '' OR industry IS NULL OR TRIM(industry) = '')
+            """
+        ).fetchone()
+        return int(row[0] if row else 0)
+
+    def fetch_tickers_missing_metadata(self, limit: int = 500) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT ticker FROM companies
+            WHERE cik IS NOT NULL AND cik != ''
+              AND (sector IS NULL OR TRIM(sector) = '' OR industry IS NULL OR TRIM(industry) = '')
+            ORDER BY ticker
             LIMIT ?
             """,
             (limit,),
@@ -570,13 +622,18 @@ class Repository:
         *,
         limit: int = 50,
         min_unique_buyers: int = 3,
+        min_buy_value: float | None = None,
     ) -> list[dict]:
         params: list = [min_unique_buyers]
         ticker_filter = ""
+        value_filter = ""
         if tickers:
             placeholders = ",".join("?" for _ in tickers)
             ticker_filter = f" AND c.ticker IN ({placeholders})"
             params.extend([t.upper() for t in tickers])
+        if min_buy_value is not None and min_buy_value > 0:
+            value_filter = " AND COALESCE(ica.total_buy_value, 0) >= ?"
+            params.append(min_buy_value)
         params.append(limit)
         rows = self.conn.execute(
             f"""
@@ -598,6 +655,7 @@ class Repository:
             WHERE ica.unique_buyers >= ?
               AND ica.intensity_score IS NOT NULL
               {ticker_filter}
+              {value_filter}
             ORDER BY ica.intensity_score DESC, ica.total_buy_value DESC
             LIMIT ?
             """,

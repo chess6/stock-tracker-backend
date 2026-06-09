@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, request
 
 from ..db import get_db
 from ..repositories import Repository
+from ..services.metric_registry import registry_for_api
 from ..services.prices import PricesService
 from ..services.research import ResearchService
 
@@ -13,6 +14,11 @@ research_bp = Blueprint("research", __name__, url_prefix="/api/research")
 def get_research_service() -> ResearchService:
     repo = Repository(get_db())
     return ResearchService(repo, PricesService(repo))
+
+
+@research_bp.route("/metrics/registry", methods=["GET"])
+def research_metrics_registry():
+    return jsonify({"metrics": registry_for_api()})
 
 
 @research_bp.route("/screener", methods=["GET"])
@@ -41,7 +47,13 @@ def research_ticker(ticker: str):
 def research_insider_clusters():
     tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
     limit = min(int(request.args.get("limit", 50)), 200)
-    payload = get_research_service().get_insider_clusters(tickers or None, limit=limit)
+    min_buy_value_raw = request.args.get("min_buy_value")
+    min_buy_value = float(min_buy_value_raw) if min_buy_value_raw not in (None, "") else None
+    payload = get_research_service().get_insider_clusters(
+        tickers or None,
+        limit=limit,
+        min_buy_value=min_buy_value,
+    )
     return jsonify(payload)
 
 

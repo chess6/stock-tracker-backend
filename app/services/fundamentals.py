@@ -8,6 +8,7 @@ import requests
 
 from ..repositories import Repository
 from .company_enrichment import metadata_from_submissions
+from .metrics_engine import build_company_metrics
 from .scoring import compute_scores_for_periods, scores_to_json
 from .sec import normalize_company_facts
 from .sec_eligibility import sec_http_outcome, should_skip_sec_fundamentals
@@ -267,17 +268,21 @@ def resolve_financial_dimension(
         }
     if code == "MRY":
         return {
-            "storage_dimension": "ARY",
+            "storage_dimension": "MRY",
             "ttm_only": False,
             "include_ttm": False,
-            "most_recent": True,
+            "most_recent": False,
+            "legacy_storage_dimension": "ARY",
+            "legacy_most_recent": True,
         }
     if code == "MRQ":
         return {
-            "storage_dimension": "ARQ",
+            "storage_dimension": "MRQ",
             "ttm_only": False,
             "include_ttm": False,
-            "most_recent": True,
+            "most_recent": False,
+            "legacy_storage_dimension": "ARQ",
+            "legacy_most_recent": True,
         }
     if code in {"TTM", "ART"}:
         return {
@@ -288,10 +293,13 @@ def resolve_financial_dimension(
         }
     if code == "MRT":
         return {
-            "storage_dimension": None,
-            "ttm_only": True,
-            "include_ttm": True,
-            "most_recent": True,
+            "storage_dimension": "MRT",
+            "ttm_only": False,
+            "include_ttm": False,
+            "most_recent": False,
+            "legacy_storage_dimension": None,
+            "legacy_ttm_only": True,
+            "legacy_most_recent": True,
         }
     return {
         "storage_dimension": code,
@@ -299,6 +307,90 @@ def resolve_financial_dimension(
         "include_ttm": False,
         "most_recent": most_recent,
     }
+
+
+SNAPSHOT_DIMENSIONS = frozenset({"MRY", "MRQ", "MRT"})
+
+
+def wide_row_to_fundamental_records(
+    company_id: int,
+    wide_row: dict,
+    *,
+    target_dimension: str,
+) -> list[dict]:
+    """Flatten a pivoted wide row into narrow fundamentals records for snapshot upsert."""
+    period_end = wide_row.get("calendardate")
+    if not period_end:
+        return []
+    period_type = wide_row.get("periodtype")
+    if not period_type:
+        if target_dimension == "MRY":
+            period_type = "annual"
+        elif target_dimension == "MRQ":
+            period_type = "quarterly"
+        else:
+            period_type = "ttm"
+    metric_names = {col["name"] for col in RAW_COLUMNS if col["type"] == "double"}
+    records: list[dict] = []
+    for metric in metric_names:
+        value = wide_row.get(metric)
+        if value is None:
+            continue
+        records.append(
+            {
+                "company_id": company_id,
+                "metric": metric,
+                "value": value,
+                "unit": "USD" if metric != "eps" else "USD/shares",
+                "period_end": period_end,
+                "period_type": period_type,
+                "dimension": target_dimension,
+                "fiscal_year": None,
+                "fiscal_quarter": None,
+                "filing_date": wide_row.get("filingdate"),
+                "form": None,
+                "accession": None,
+                "source": "fundamentals_snapshot",
+                "taxonomy": None,
+                "xbrl_concept": f"snapshot_{target_dimension}",
+            }
+        )
+    return records
+
+
+def fetch_resolved_wide_rows(
+    repo: Repository,
+    tickers: list[str],
+    *,
+    gte: str | None,
+    resolved: dict[str, object],
+) -> list[dict]:
+    """Load fundamentals wide rows with snapshot-dimension fallback to legacy ARY/ARQ/TTM compute."""
+    storage_dimension = resolved.get("storage_dimension")
+    rows = repo.fetch_fundamentals_rows(
+        tickers,
+        gte=gte,
+        dimension=storage_dimension if isinstance(storage_dimension, str) else None,
+    )
+    wide_rows = pivot_fundamentals_rows(rows)
+
+    if not wide_rows:
+        legacy_dim = resolved.get("legacy_storage_dimension")
+        if legacy_dim or resolved.get("legacy_ttm_only"):
+            source_dim = legacy_dim if isinstance(legacy_dim, str) else "ARQ"
+            legacy_rows = repo.fetch_fundamentals_rows(tickers, gte=gte, dimension=source_dim)
+            wide_rows = pivot_fundamentals_rows(legacy_rows)
+            if resolved.get("legacy_ttm_only"):
+                wide_rows = compute_ttm_rows(wide_rows)
+
+    if (resolved.get("legacy_most_recent") or resolved.get("most_recent")) and wide_rows:
+        latest_by_ticker: dict[str, dict] = {}
+        for row in wide_rows:
+            current = latest_by_ticker.get(row["ticker"])
+            if current is None or (row.get("calendardate") or "") > (current.get("calendardate") or ""):
+                latest_by_ticker[row["ticker"]] = row
+        return list(latest_by_ticker.values())
+    return wide_rows
 
 
 BALANCE_SHEET_METRICS = frozenset(
@@ -341,136 +433,6 @@ def compute_ttm_rows(wide_rows: list[dict]) -> list[dict]:
                     ttm_row[metric] = sum(values)
         ttm_rows.append(ttm_row)
     return ttm_rows
-
-
-def build_company_metrics(row: dict, price: float | None = None) -> dict:
-    shares = row.get("sharesbas")
-    revenue = row.get("revenue")
-    assets = row.get("assets")
-    liabilities = row.get("liabilities")
-    equity = row.get("equity")
-    ncfo = row.get("ncfo")
-    capex = row.get("capex")
-    fcf = row.get("fcf")
-    netinc = row.get("netinc")
-    if fcf is None and ncfo is not None:
-        if capex is not None:
-            fcf = ncfo - capex
-        else:
-            # Banks and other filers often omit capex in XBRL; use operating CF as FCF proxy.
-            fcf = ncfo
-    eps = row.get("eps")
-    taxexp = row.get("taxexp")
-    interestexp = row.get("interestexp")
-    ebitda = row.get("ebitda")
-    if ebitda is None:
-        ebitda = row.get("opinc") or row.get("ebit")
-    if ebitda is None and netinc is not None:
-        pretax_proxy = netinc + abs(taxexp or 0)
-        ebitda = pretax_proxy + abs(interestexp or 0)
-    debt = row.get("debt")
-    if debt is None:
-        debt_current = row.get("debtcurrent")
-        debt_lt = row.get("debtlt")
-        if debt_current is not None or debt_lt is not None:
-            debt = (debt_current or 0.0) + (debt_lt or 0.0)
-    cashneq = row.get("cashneq")
-    market_cap = None
-    book_value = None
-    sales_per_share = None
-    cashflow_ops_per_share = None
-    sfcf_per_share = None
-    ebitda_ev = None
-    if shares not in (None, 0):
-        if equity is not None:
-            book_value = equity / shares
-        elif assets is not None and liabilities is not None:
-            book_value = (assets - liabilities) / shares
-        if revenue is not None:
-            sales_per_share = revenue / shares
-        if ncfo is not None:
-            cashflow_ops_per_share = ncfo / shares
-        if fcf is not None:
-            sfcf_per_share = fcf / shares
-    if shares not in (None, 0) and price is not None:
-        market_cap = shares * price
-    ncf = row.get("ncf")
-    enterprise_value = None
-    if market_cap is not None:
-        enterprise_value = market_cap + (debt or 0) - (cashneq or 0)
-        if enterprise_value <= 0:
-            enterprise_value = None
-    if ebitda is not None and enterprise_value:
-        ebitda_ev = ebitda / enterprise_value
-    ncf_per_share = None
-    cash_per_share = None
-    asset_per_share = None
-    rev_debt = None
-    mc_ev = None
-    if shares not in (None, 0):
-        if ncf is not None:
-            ncf_per_share = ncf / shares
-        if cashneq is not None:
-            cash_per_share = cashneq / shares
-        if assets is not None:
-            asset_per_share = assets / shares
-    if revenue is not None and debt not in (None, 0):
-        rev_debt = revenue / debt
-    if market_cap is not None and enterprise_value:
-        mc_ev = market_cap / enterprise_value
-    pe = None
-    if eps not in (None, 0) and price is not None:
-        pe = price / eps
-    roe = None
-    if netinc is not None and equity not in (None, 0):
-        roe = netinc / equity
-    roa = None
-    if netinc is not None and assets not in (None, 0):
-        roa = netinc / assets
-    gp = row.get("gp")
-    gross_margin = None
-    if gp is not None and revenue not in (None, 0):
-        gross_margin = gp / revenue
-    net_margin = None
-    if netinc is not None and revenue not in (None, 0):
-        net_margin = netinc / revenue
-    de = None
-    if debt is not None and equity not in (None, 0):
-        de = debt / equity
-    current_ratio = None
-    assets_current = row.get("assetscurrent")
-    liabilities_current = row.get("liabilitiescurrent")
-    if assets_current is not None and liabilities_current not in (None, 0):
-        current_ratio = assets_current / liabilities_current
-    div_yield = None
-    ncfdiv = row.get("ncfdiv")
-    if ncfdiv is not None and shares not in (None, 0) and price not in (None, 0):
-        dps = abs(ncfdiv) / shares
-        div_yield = dps / price
-    return {
-        "marketCap": market_cap,
-        "revenue": revenue,
-        "sp": sales_per_share,
-        "ebitdaEv": ebitda_ev,
-        "tbp": book_value,
-        "bp": book_value,
-        "ep": eps,
-        "cfop": cashflow_ops_per_share,
-        "sfcfp": sfcf_per_share,
-        "ncfp": ncf_per_share,
-        "cashp": cash_per_share,
-        "assetp": asset_per_share,
-        "revDebt": rev_debt,
-        "mcEv": mc_ev,
-        "pe": pe,
-        "roe": roe,
-        "roa": roa,
-        "grossMargin": gross_margin,
-        "netMargin": net_margin,
-        "de": de,
-        "currentRatio": current_ratio,
-        "divYield": div_yield,
-    }
 
 
 class FundamentalsService:
@@ -549,6 +511,7 @@ class FundamentalsService:
             inserted += count
             logger.debug("refresh_fundamentals ticker=%s records=%d", ticker, count)
             self._refresh_company_scores(company["id"], ticker)
+            inserted += self._materialize_snapshot_dimensions(company["id"], ticker)
             try:
                 submissions = self.sec_client.fetch_submissions(company["cik"])
                 meta = metadata_from_submissions(submissions)
@@ -600,6 +563,42 @@ class FundamentalsService:
         logger.debug("refresh_company_scores ticker=%s periods=%d", ticker, written)
         return written
 
+    def _materialize_snapshot_dimensions(self, company_id: int, ticker: str) -> int:
+        """Persist latest MRY/MRQ/MRT snapshot rows for fast dimension queries."""
+        self.repo.delete_fundamentals_snapshots(company_id, SNAPSHOT_DIMENSIONS)
+        records: list[dict] = []
+
+        annual_rows = pivot_fundamentals_rows(
+            self.repo.fetch_fundamentals_rows([ticker], dimension="ARY")
+        )
+        if annual_rows:
+            latest_annual = max(annual_rows, key=lambda row: row.get("calendardate") or "")
+            records.extend(
+                wide_row_to_fundamental_records(company_id, latest_annual, target_dimension="MRY")
+            )
+
+        quarterly_rows = pivot_fundamentals_rows(
+            self.repo.fetch_fundamentals_rows([ticker], dimension="ARQ")
+        )
+        if quarterly_rows:
+            latest_quarter = max(quarterly_rows, key=lambda row: row.get("calendardate") or "")
+            records.extend(
+                wide_row_to_fundamental_records(company_id, latest_quarter, target_dimension="MRQ")
+            )
+            ttm_rows = compute_ttm_rows(quarterly_rows)
+            if ttm_rows:
+                latest_ttm = max(ttm_rows, key=lambda row: row.get("calendardate") or "")
+                mrt_row = {**latest_ttm, "dimension": "MRT", "periodtype": "ttm"}
+                records.extend(
+                    wide_row_to_fundamental_records(company_id, mrt_row, target_dimension="MRT")
+                )
+
+        if not records:
+            return 0
+        written = self.repo.upsert_fundamentals(records)
+        logger.debug("materialize_snapshot_dimensions ticker=%s records=%d", ticker, written)
+        return written
+
     def refresh_company_scores_batch(self, tickers: list[str] | None = None) -> dict:
         """Recompute materialized scores for tickers or all companies with annual fundamentals."""
         if tickers:
@@ -636,26 +635,31 @@ class FundamentalsService:
             "skipped": skipped,
         }
 
-    def enrich_company_metadata(self, tickers: list[str]) -> dict:
+    def enrich_company_metadata(self, tickers: list[str] | None = None, *, all_missing: bool = False) -> dict:
+        if all_missing or not tickers:
+            tickers = self.repo.fetch_tickers_missing_metadata(limit=500 if all_missing else 100)
         logger.info("enrich_company_metadata start tickers=%d", len(tickers))
         t0 = time.monotonic()
         enriched = []
+        skipped = []
         for ticker in [t.upper() for t in tickers if t]:
             company = self.repo.get_company_by_ticker(ticker)
             if not company or not company.get("cik"):
                 logger.debug("enrich_company_metadata skip ticker=%s (no CIK)", ticker)
+                skipped.append({"ticker": ticker, "reason": "no_cik"})
                 continue
             try:
                 submissions = self.sec_client.fetch_submissions(company["cik"])
             except Exception:
                 logger.debug("enrich_company_metadata fetch failed ticker=%s", ticker)
+                skipped.append({"ticker": ticker, "reason": "sec_fetch_failed"})
                 continue
             meta = metadata_from_submissions(submissions)
             self.repo.update_company_metadata(ticker, meta)
             enriched.append(ticker)
         elapsed = time.monotonic() - t0
         logger.info("enrich_company_metadata done enriched=%d elapsed=%.1fs", len(enriched), elapsed)
-        return {"enriched": len(enriched), "tickers": enriched}
+        return {"enriched": len(enriched), "tickers": enriched, "skipped": skipped}
 
     def get_financials_payload(self, tickers: list[str], gte: str | None, dimension: str | None, most_recent: bool) -> dict:
         resolved = resolve_financial_dimension(dimension, most_recent)
@@ -664,14 +668,17 @@ class FundamentalsService:
         include_ttm = bool(resolved["include_ttm"])
         use_most_recent = bool(resolved["most_recent"])
 
-        rows = self.repo.fetch_fundamentals_rows(
-            tickers,
-            gte=gte,
-            dimension=storage_dimension if isinstance(storage_dimension, str) else None,
-        )
-        wide_rows = pivot_fundamentals_rows(rows)
+        if dimension:
+            wide_rows = fetch_resolved_wide_rows(self.repo, tickers, gte=gte, resolved=resolved)
+        else:
+            rows = self.repo.fetch_fundamentals_rows(
+                tickers,
+                gte=gte,
+                dimension=storage_dimension if isinstance(storage_dimension, str) else None,
+            )
+            wide_rows = pivot_fundamentals_rows(rows)
 
-        if include_ttm or (not dimension and not use_most_recent):
+        if not dimension and (include_ttm or not use_most_recent):
             ttm_rows = compute_ttm_rows(wide_rows)
             if ttm_only:
                 wide_rows = ttm_rows

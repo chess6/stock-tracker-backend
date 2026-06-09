@@ -38,6 +38,7 @@ def enqueue_scheduled_jobs(database_path: str, tickers: list[str]) -> None:
         repo.enqueue_job("refresh_fundamentals", {"tickers": tickers}, priority=20)
         repo.enqueue_job("refresh_prices", {"tickers": tickers}, priority=30)
         repo.enqueue_job("refresh_company_scores", {"all": True}, priority=32)
+        repo.enqueue_job("enrich_metadata", {"all_missing": True}, priority=33)
         repo.enqueue_job("refresh_macro", {}, priority=35)
         repo.enqueue_job("refresh_insiders", {"tickers": tickers}, priority=40)
         repo.enqueue_job(

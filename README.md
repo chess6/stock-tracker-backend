@@ -138,7 +138,8 @@ All admin routes are unauthenticated — intended for localhost dev only.
 |--------|------|-------------|
 | POST | `/api/admin/bootstrap?tickers=` | Full pipeline: sync companies → fundamentals → RSS (fast) → prices → insiders |
 | POST | `/api/admin/sync-companies` | SEC `company_tickers.json` → `companies` (~10k rows) |
-| POST | `/api/admin/refresh-fundamentals?tickers=` | SEC XBRL CompanyFacts → `fundamentals` |
+| POST | `/api/admin/refresh-fundamentals?tickers=` | SEC XBRL CompanyFacts → `fundamentals` (+ MRY/MRQ/MRT snapshots) |
+| POST | `/api/admin/enrich-metadata?tickers=` or `?all=true` | SEC submissions → `companies.sector` / `industry` |
 | POST | `/api/admin/refresh-prices?tickers=` | Stooq/yfinance OHLCV → `prices` |
 | POST | `/api/admin/refresh-macro` | Benchmark ETF prices (SPY, QQQ, …) → `prices` |
 | POST | `/api/admin/backfill-market-reactions?ticker=&limit=` | Recompute `article_market_reactions` (Research narrative / topEvents) |

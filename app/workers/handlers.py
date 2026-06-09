@@ -77,6 +77,8 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         return ctx.insiders.refresh_insiders(tickers)
 
     def enrich_metadata(payload: dict) -> dict:
+        if payload.get("all_missing"):
+            return ctx.fundamentals.enrich_company_metadata(None, all_missing=True)
         tickers = payload.get("tickers") or ctx.default_tickers
         return ctx.fundamentals.enrich_company_metadata(tickers)
 

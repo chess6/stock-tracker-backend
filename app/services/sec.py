@@ -406,6 +406,9 @@ def _apply_derived_metrics(records: list[dict]) -> None:
         if metrics.get("gp") is None and revenue is not None and cor is not None:
             _append_derived(records, index, template, "gp", revenue - cor, "derived_gp")
 
+        if metrics.get("opinc") is None and metrics.get("gp") is not None and metrics.get("opex") is not None:
+            _append_derived(records, index, template, "opinc", metrics["gp"] - metrics["opex"], "derived_opinc")
+
         if metrics.get("ebit") is None and metrics.get("opinc") is not None:
             _append_derived(records, index, template, "ebit", metrics["opinc"], "derived_ebit")
 

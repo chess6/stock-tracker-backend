@@ -370,13 +370,17 @@ def sync_companies():
 
 @api_bp.route("/admin/enrich-metadata", methods=["POST"])
 def enrich_metadata():
+    all_missing = request.args.get("all", "").lower() in {"1", "true", "yes"}
     tickers = request.json.get("tickers") if request.is_json else None
-    if not tickers:
+    if not tickers and not all_missing:
         tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
-    if not tickers:
-        return jsonify({"error": "No tickers provided"}), 400
+    if not tickers and not all_missing:
+        return jsonify({"error": "No tickers provided (or pass ?all=true for missing sector/industry)"}), 400
     try:
-        payload = get_fundamentals_service().enrich_company_metadata(tickers)
+        payload = get_fundamentals_service().enrich_company_metadata(
+            tickers,
+            all_missing=all_missing,
+        )
     except Exception as exc:
         current_app.logger.exception("Metadata enrichment failed")
         return jsonify({"error": str(exc)}), 500

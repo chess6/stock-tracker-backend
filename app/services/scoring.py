@@ -4,69 +4,19 @@ import json
 import logging
 from typing import Any
 
+from .metric_primitives import (
+    asset_turnover as _asset_turnover,
+    current_ratio as _current_ratio,
+    free_cash_flow as _fcf,
+    gross_margin as _gross_margin,
+    leverage as _leverage,
+    operating_margin as _operating_margin,
+    roa as _roa,
+    safe_div as _safe_div,
+    total_debt as _debt,
+)
+
 logger = logging.getLogger("stock_tracker.scoring")
-
-
-def _safe_div(numerator: float | None, denominator: float | None) -> float | None:
-    if numerator is None or denominator in (None, 0):
-        return None
-    return numerator / denominator
-
-
-def _debt(row: dict) -> float | None:
-    debt = row.get("debt")
-    if debt is not None:
-        return debt
-    debt_current = row.get("debtcurrent")
-    debt_lt = row.get("debtlt")
-    if debt_current is not None or debt_lt is not None:
-        return (debt_current or 0.0) + (debt_lt or 0.0)
-    return None
-
-
-def _fcf(row: dict) -> float | None:
-    fcf = row.get("fcf")
-    if fcf is not None:
-        return fcf
-    ncfo = row.get("ncfo")
-    capex = row.get("capex")
-    if ncfo is None:
-        return None
-    if capex is not None:
-        return ncfo - capex
-    return ncfo
-
-
-def _gross_margin(row: dict) -> float | None:
-    revenue = row.get("revenue")
-    gp = row.get("gp")
-    if gp is None and revenue is not None:
-        cor = row.get("cor")
-        if cor is not None:
-            gp = revenue - cor
-    return _safe_div(gp, revenue)
-
-
-def _operating_margin(row: dict) -> float | None:
-    revenue = row.get("revenue")
-    opinc = row.get("opinc") or row.get("ebit")
-    return _safe_div(opinc, revenue)
-
-
-def _current_ratio(row: dict) -> float | None:
-    return _safe_div(row.get("assetscurrent"), row.get("liabilitiescurrent"))
-
-
-def _roa(row: dict) -> float | None:
-    return _safe_div(row.get("netinc"), row.get("assets"))
-
-
-def _asset_turnover(row: dict) -> float | None:
-    return _safe_div(row.get("revenue"), row.get("assets"))
-
-
-def _leverage(row: dict) -> float | None:
-    return _safe_div(_debt(row), row.get("assets"))
 
 
 def compute_piotroski_f(current: dict, prior: dict) -> tuple[int | None, dict[str, int]]:

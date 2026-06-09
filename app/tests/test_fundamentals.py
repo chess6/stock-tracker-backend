@@ -9,12 +9,12 @@ from app.services.sec import normalize_company_facts
 
 
 def test_resolve_financial_dimension_maps_sharadar_codes():
-    assert resolve_financial_dimension("MRY", False)["storage_dimension"] == "ARY"
-    assert resolve_financial_dimension("MRY", False)["most_recent"] is True
-    assert resolve_financial_dimension("MRQ", False)["storage_dimension"] == "ARQ"
+    assert resolve_financial_dimension("MRY", False)["storage_dimension"] == "MRY"
+    assert resolve_financial_dimension("MRY", False)["legacy_storage_dimension"] == "ARY"
+    assert resolve_financial_dimension("MRQ", False)["storage_dimension"] == "MRQ"
     assert resolve_financial_dimension("ART", False)["ttm_only"] is True
-    assert resolve_financial_dimension("MRT", False)["most_recent"] is True
-    assert resolve_financial_dimension("MRT", False)["ttm_only"] is True
+    assert resolve_financial_dimension("MRT", False)["storage_dimension"] == "MRT"
+    assert resolve_financial_dimension("MRT", False)["legacy_ttm_only"] is True
 
 
 def test_normalize_company_facts_maps_us_gaap_shares_outstanding():
@@ -95,6 +95,41 @@ def test_normalize_company_facts_maps_core_metrics():
     assert metrics[("fcf", "2024-12-31", "ARY")]["value"] == 150.0
 
 
+def test_normalize_company_facts_derives_opinc_from_gp_and_opex():
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            {"val": 1000, "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2025-01-20", "end": "2024-12-31", "accn": "1"},
+                        ]
+                    }
+                },
+                "CostOfRevenue": {
+                    "units": {
+                        "USD": [
+                            {"val": 400, "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2025-01-20", "end": "2024-12-31", "accn": "1"},
+                        ]
+                    }
+                },
+                "OperatingExpenses": {
+                    "units": {
+                        "USD": [
+                            {"val": 200, "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2025-01-20", "end": "2024-12-31", "accn": "1"},
+                        ]
+                    }
+                },
+            }
+        }
+    }
+
+    rows = normalize_company_facts(11, payload)
+    metrics = {(row["metric"], row["period_end"]): row["value"] for row in rows}
+    assert metrics[("gp", "2024-12-31")] == 600.0
+    assert metrics[("opinc", "2024-12-31")] == 400.0
+
+
 def test_normalize_company_facts_derives_gp_and_ebitda():
     payload = {
         "facts": {
@@ -136,6 +171,64 @@ def test_normalize_company_facts_derives_gp_and_ebitda():
     assert metrics[("gp", "2024-12-31")] == 600.0
     assert metrics[("ebit", "2024-12-31")] == 300.0
     assert metrics[("ebitda", "2024-12-31")] == 350.0
+
+
+def test_materialize_snapshot_dimensions_persists_mry_mrq_mrt(app):
+    from app.db import get_db
+    from app.repositories import Repository
+    from app.services.fundamentals import FundamentalsService
+
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies(
+            [{"ticker": "SNAP", "name": "Snap Co", "cik": "0000000099", "sector": "Tech", "industry": "Software"}]
+        )
+        company = repo.get_company_by_ticker("SNAP")
+        records = []
+        for period_end, dimension, revenue in [
+            ("2024-12-31", "ARY", 1000.0),
+            ("2024-09-30", "ARQ", 260.0),
+            ("2024-06-30", "ARQ", 250.0),
+            ("2024-03-31", "ARQ", 240.0),
+            ("2023-12-31", "ARQ", 230.0),
+        ]:
+            records.append(
+                {
+                    "company_id": company["id"],
+                    "metric": "revenue",
+                    "value": revenue,
+                    "unit": "USD",
+                    "period_end": period_end,
+                    "period_type": "annual" if dimension == "ARY" else "quarterly",
+                    "dimension": dimension,
+                    "fiscal_year": 2024,
+                    "fiscal_quarter": "FY" if dimension == "ARY" else "Q3",
+                    "filing_date": "2025-01-20",
+                    "form": "10-K" if dimension == "ARY" else "10-Q",
+                    "accession": "test",
+                    "source": "test",
+                    "taxonomy": "us-gaap",
+                    "xbrl_concept": "Revenues",
+                }
+            )
+        repo.upsert_fundamentals(records)
+
+        class StubSec:
+            def fetch_submissions(self, cik):
+                return {"filings": {"recent": {}}}
+
+        service = FundamentalsService(repo, StubSec())
+        written = service._materialize_snapshot_dimensions(company["id"], "SNAP")
+        assert written > 0
+
+        mry_rows = repo.fetch_fundamentals_rows(["SNAP"], dimension="MRY")
+        mrq_rows = repo.fetch_fundamentals_rows(["SNAP"], dimension="MRQ")
+        mrt_rows = repo.fetch_fundamentals_rows(["SNAP"], dimension="MRT")
+        assert mry_rows
+        assert mrq_rows
+        assert mrt_rows
+        assert any(row["metric"] == "revenue" for row in mry_rows)
+        assert any(row["metric"] == "revenue" for row in mrt_rows)
 
 
 def test_build_company_metrics_computes_ebitda_ev():
@@ -234,6 +327,18 @@ def test_refresh_fundamentals_continues_after_sec_404():
             self.fundamentals.extend(records)
             return len(records)
 
+        def fetch_fundamentals_rows(self, tickers, gte=None, dimension=None):
+            return []
+
+        def delete_fundamentals_snapshots(self, company_id, dimensions):
+            return 0
+
+        def upsert_company_scores(self, company_id, records):
+            return 0
+
+        def fetch_price_near_date(self, ticker, target_date):
+            return None
+
         def update_company_metadata(self, ticker, meta):
             return None
 
@@ -270,6 +375,18 @@ def test_refresh_fundamentals_skips_etf_before_sec_call():
 
         def upsert_fundamentals(self, records):
             raise AssertionError("SEC should not be called for ETF")
+
+        def fetch_fundamentals_rows(self, tickers, gte=None, dimension=None):
+            return []
+
+        def delete_fundamentals_snapshots(self, company_id, dimensions):
+            return 0
+
+        def upsert_company_scores(self, company_id, records):
+            return 0
+
+        def fetch_price_near_date(self, ticker, target_date):
+            return None
 
         def update_company_metadata(self, ticker, meta):
             return None

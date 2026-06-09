@@ -5,9 +5,11 @@ import logging
 from ..repositories import Repository
 from .fundamentals import (
     RAW_COLUMNS,
+    SNAPSHOT_DIMENSIONS,
     build_company_metrics,
     collapse_narrow_fundamentals_rows,
     compute_ttm_rows,
+    fetch_resolved_wide_rows,
     pivot_fundamentals_rows,
     resolve_financial_dimension,
 )
@@ -34,22 +36,7 @@ class ResearchService:
             return {"tickers": [], "results": {}}
 
         resolved = resolve_financial_dimension(dimension or "MRY", most_recent=False)
-        storage_dimension = resolved["storage_dimension"]
-        use_most_recent = bool(resolved["most_recent"])
-
-        rows = self.repo.fetch_fundamentals_rows(
-            tickers,
-            dimension=storage_dimension if isinstance(storage_dimension, str) else "ARY",
-        )
-        wide_rows = pivot_fundamentals_rows(rows)
-
-        if use_most_recent:
-            latest_by_ticker: dict[str, dict] = {}
-            for row in wide_rows:
-                current = latest_by_ticker.get(row["ticker"])
-                if current is None or (row.get("calendardate") or "") > (current.get("calendardate") or ""):
-                    latest_by_ticker[row["ticker"]] = row
-            wide_rows = list(latest_by_ticker.values())
+        wide_rows = fetch_resolved_wide_rows(self.repo, tickers, gte=None, resolved=resolved)
 
         all_annual = pivot_fundamentals_rows(
             self.repo.fetch_fundamentals_rows(tickers, dimension="ARY")
@@ -141,7 +128,9 @@ class ResearchService:
                 narrow_rows = collapse_narrow_fundamentals_rows(narrow_rows, annual=False)
             return pivot_fundamentals_rows(narrow_rows)
 
-        if ttm_only or include_ttm:
+        if isinstance(storage_dimension, str) and storage_dimension in SNAPSHOT_DIMENSIONS:
+            all_rows = fetch_resolved_wide_rows(self.repo, [symbol], gte=gte, resolved=resolved)
+        elif ttm_only or include_ttm:
             quarterly_rows = load_wide_rows([symbol], storage_dim="ARQ", annual=False)
             ttm_rows = compute_ttm_rows(quarterly_rows)
             all_rows = ttm_rows if ttm_only else ttm_rows + quarterly_rows
@@ -228,8 +217,13 @@ class ResearchService:
         tickers: list[str] | None = None,
         *,
         limit: int = 50,
+        min_buy_value: float | None = None,
     ) -> dict:
-        clusters = self.repo.fetch_insider_cluster_rankings(tickers, limit=limit)
+        clusters = self.repo.fetch_insider_cluster_rankings(
+            tickers,
+            limit=limit,
+            min_buy_value=min_buy_value,
+        )
         if clusters or not tickers:
             return {"clusters": clusters}
 

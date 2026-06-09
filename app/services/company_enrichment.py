@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def sic_to_sector(sic: str | int | None) -> str | None:
-    """Map SEC SIC code to a coarse sector label (RK GICS-inspired grouping)."""
+    """Map SEC SIC code to a coarse sector label (GICS-inspired grouping)."""
     if sic is None or sic == "":
         return None
     try:

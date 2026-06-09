@@ -9,6 +9,9 @@ def test_admin_status_and_default_feeds(app, client):
     payload = status_response.get_json()
     assert "counts" in payload
     assert "freshness" in payload
+    assert "coverage" in payload
+    assert "companyScoresUpdatedAt" in payload["freshness"]
+    assert "companiesMissingMetadata" in payload["coverage"]
     assert "jobs" in payload
     assert "feeds" in payload
 

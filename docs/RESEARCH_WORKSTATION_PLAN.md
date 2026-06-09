@@ -1,6 +1,6 @@
 ---
 name: Deep Value Research Page
-overview: Architecture and phased implementation plan for a high-density, terminal-inspired deep value research page — a spreadsheet-like financial analysis interface with scoring models (Piotroski, Altman, Beneish), insider cluster tracking, narrative correlation, and Bloomberg-terminal density.
+overview: Architecture and phased implementation plan for a high-density deep value research page — a spreadsheet-like financial analysis interface with scoring models (Piotroski, Altman, Beneish), insider cluster tracking, narrative correlation, and Bloomberg-terminal density.
 todos:
   - id: phase1-scoring
     content: "Phase 1: Backend scoring engine (Piotroski, Altman, Beneish, survivability) + company_scores table + research API endpoints"
@@ -64,7 +64,7 @@ isProject: false
 
 ### Three operational modes
 
-1. **Screener mode** (`/research`) — multi-ticker comparative grid, comparative grid style
+1. **Screener mode** (`/research`) — multi-ticker comparative grid, spreadsheet-style layout
 2. **Deep-dive mode** (`/research/:ticker`) — single company with full history, scoring, insider timeline, news correlation
 3. **Watchlist mode** — research grid filtered to a saved watchlist
 
@@ -428,12 +428,30 @@ No new state library needed. Current pattern (page-level `useState` + `useEffect
 - Batch score computation in background worker (nightly after fundamentals refresh)
 - REFACTOR_PLAN.md update
 
+### Post-Phase 5 follow-up (June 2026) — in progress
+
+Phase 6 (fundamentals screener + score-threshold universe filters) is **deferred** for a separate pass.
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Phase 3b SEC metrics audit | **mostly done** | `SEC_METRIC_CONFIG` expanded; `opinc` derived from gp−opex |
+| MR/TTM snapshot materialization | **done** | Persist `MRY`/`MRQ`/`MRT` rows after fundamentals refresh |
+| `$+` insider cluster screener | **done** | `/screener?mode=cluster` + `min_buy_value` on clusters API |
+| Bulk sector/industry enrichment | **done** | `POST /api/admin/enrich-metadata?all=true` + nightly worker job |
+| Admin observability | **done** | `companyScoresUpdatedAt`, missing-sector count, narrative reaction coverage |
+| Research / narrative tests | **done** | Snapshot dimension + admin coverage tests |
+| Market-reaction backfill | **ops** | `./backfill_market_reactions.sh` for narrative panels |
+
+### Phase 6 — deferred
+
+- Fundamentals universe screener (filter by P/E, scores, sector without ticker list)
+- Factor-driven opportunity discovery (score combination thresholds)
+
 ### Future (not in initial build)
 
 - 13F institutional holdings ingestion (whale tracking)
 - Curated whale fund CIK map + Form 4 cross-reference
 - Historical analog detection (embedding similarity across event clusters)
-- Factor-driven opportunity discovery (screen by score combination thresholds)
 - Custom scoring model builder (user-defined weighted composites)
 
 ---
