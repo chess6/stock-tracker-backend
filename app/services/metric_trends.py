@@ -21,7 +21,7 @@ def qoq_pct(current: float | None, prior: float | None) -> float | None:
 
 
 def cagr_pct(start: float | None, end: float | None, years: float | None) -> float | None:
-    """Compound annual growth rate as percent."""
+    """Compound annual growth rate as percent (same-sign non-zero endpoints)."""
     if start is None or end is None or years is None:
         return None
     s = float(start)
@@ -29,9 +29,12 @@ def cagr_pct(start: float | None, end: float | None, years: float | None) -> flo
     n = float(years)
     if not _finite(s) or not _finite(e) or not _finite(n) or n <= 0:
         return None
-    if s <= 0 or e <= 0:
+    if s == 0 or e == 0 or s * e < 0:
         return None
-    return (pow(e / s, 1.0 / n) - 1.0) * 100.0
+    ratio = abs(e) / abs(s)
+    if ratio <= 0:
+        return None
+    return (pow(ratio, 1.0 / n) - 1.0) * 100.0
 
 
 def margin_delta(current_margin: float | None, prior_margin: float | None) -> float | None:
@@ -47,16 +50,31 @@ def margin_delta(current_margin: float | None, prior_margin: float | None) -> fl
 def trend_summary(values_newest_first: list[float | None]) -> dict[str, float | None]:
     """Build YoY and CAGR summaries from a newest-first value series."""
     vals = list(values_newest_first)
-    summary: dict[str, float | None] = {
-        "yoy": yoy_pct(vals[0], vals[1]) if len(vals) > 1 else None,
-        "qoq": yoy_pct(vals[0], vals[1]) if len(vals) > 1 else None,
+    yoy = yoy_pct(vals[0], vals[1]) if len(vals) > 1 else None
+    cagr3y = None
+    cagr5y = None
+
+    if len(vals) >= 3:
+        start_idx = len(vals) - 1
+        while start_idx > 0 and vals[start_idx] is None:
+            start_idx -= 1
+        span_cagr = (
+            cagr_pct(vals[start_idx], vals[0], start_idx)
+            if start_idx > 0 and vals[0] is not None and vals[start_idx] is not None
+            else None
+        )
+        if yoy is None or span_cagr is None:
+            yoy = None
+            span_cagr = None
+        cagr3y = span_cagr if start_idx >= 3 else None
+        cagr5y = span_cagr
+
+    return {
+        "yoy": yoy,
+        "qoq": yoy,
+        "cagr3y": cagr3y,
+        "cagr5y": cagr5y,
     }
-    for years in (3, 5):
-        if len(vals) > years:
-            summary[f"cagr{years}y"] = cagr_pct(vals[years], vals[0], years)
-        else:
-            summary[f"cagr{years}y"] = None
-    return summary
 
 
 def build_metric_trends(

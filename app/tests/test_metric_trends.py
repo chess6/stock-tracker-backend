@@ -20,6 +20,7 @@ def test_yoy_pct_basic():
 
 def test_cagr_pct_basic():
     assert cagr_pct(100, 121, 2) == pytest.approx(10.0)
+    assert cagr_pct(-100, -121, 2) == pytest.approx(10.0)
     assert cagr_pct(0, 100, 3) is None
     assert cagr_pct(100, -50, 3) is None
 
@@ -34,6 +35,12 @@ def test_trend_summary_newest_first():
     assert summary["yoy"] == 50.0
     assert summary["cagr3y"] is not None
     assert summary["cagr5y"] is not None
+
+
+def test_trend_summary_mutual_inclusivity():
+    summary = trend_summary([150.0, 100.0, 80.0, 60.0, -50.0])
+    assert summary["yoy"] is None
+    assert summary["cagr5y"] is None
 
 
 def test_build_metric_trends_from_periods():
