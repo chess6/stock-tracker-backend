@@ -28,6 +28,7 @@ _COMPOSITE_PRESETS: dict[str, dict[str, Any]] = {
             ("valuation_dislocation", 0.25, "_factor_valuation_dislocation"),
             ("survivability", 0.20, "_factor_survivability"),
             ("insider_conviction", 0.15, "_factor_insider_conviction"),
+            ("sentiment_divergence", 0.15, "_factor_sentiment_divergence"),
             ("margin_stabilization", 0.15, "_factor_margin_stabilization"),
             ("fcf_quality", 0.10, "_factor_fcf_quality"),
         ],
@@ -40,6 +41,16 @@ _COMPOSITE_PRESETS: dict[str, dict[str, Any]] = {
             ("insider_buying", 0.20, "_factor_insider_conviction"),
             ("fcf_stabilization", 0.20, "_factor_fcf_quality"),
             ("survivability", 0.15, "_factor_survivability"),
+        ],
+    },
+    "rerating_candidate": {
+        "label": "Rerating Candidate",
+        "factors": [
+            ("sentiment_divergence", 0.30, "_factor_sentiment_divergence"),
+            ("insider_conviction", 0.25, "_factor_insider_conviction"),
+            ("gross_margin_recovery", 0.20, "_factor_margin_stabilization"),
+            ("survivability", 0.15, "_factor_survivability"),
+            ("altman_improvement", 0.10, "_factor_altman"),
         ],
     },
 }
@@ -209,6 +220,23 @@ def _factor_fcf_quality(candidate: dict, sector_stats: dict[str, Any]) -> dict[s
     return {"normalized": sum(ranks) / len(ranks), "raw": raw}
 
 
+def _factor_sentiment_divergence(candidate: dict, sector_stats: dict[str, Any]) -> dict[str, Any] | None:
+    narrative = candidate.get("narrative") or {}
+    score = narrative.get("divergence_score")
+    signal = narrative.get("divergence_signal")
+    if score is None and not signal:
+        return None
+    normalized = max(0.0, min(1.0, float(score))) if score is not None else 0.5
+    if signal in ("rerating_candidate", "high_conviction"):
+        normalized = max(normalized, 0.75)
+    elif signal == "risk_flag":
+        normalized = min(normalized, 0.25)
+    return {
+        "normalized": normalized,
+        "raw": {"divergence_score": score, "divergence_signal": signal},
+    }
+
+
 def _factor_altman(candidate: dict, sector_stats: dict[str, Any]) -> dict[str, Any] | None:
     altman = (candidate.get("scores") or {}).get("altmanZ")
     if not _finite(altman):
@@ -224,6 +252,7 @@ _FACTOR_IMPL: dict[str, _FACTOR_FN] = {
     "_factor_insider_conviction": _factor_insider_conviction,
     "_factor_margin_stabilization": _factor_margin_stabilization,
     "_factor_fcf_quality": _factor_fcf_quality,
+    "_factor_sentiment_divergence": _factor_sentiment_divergence,
     "_factor_altman": _factor_altman,
 }
 
@@ -302,6 +331,14 @@ def run_composite_rank(
 
     symbol_list = [str(t).strip().upper() for t in symbol_list if str(t).strip()][:MAX_UNIVERSE_TICKERS]
     candidates = build_research_candidates(repo, prices_service, symbol_list)
+    narrative_snapshots = repo.fetch_latest_narrative_snapshots(list(candidates.keys()))
+    for ticker, candidate in candidates.items():
+        snap = narrative_snapshots.get(ticker)
+        if snap:
+            candidate["narrative"] = {
+                "divergence_score": snap.get("divergence_score"),
+                "divergence_signal": snap.get("divergence_signal"),
+            }
     if not candidates:
         return {
             "meta": {

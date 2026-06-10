@@ -30,17 +30,19 @@ def test_approximate_sector_percentile_interpolates_and_inverts():
     assert approximate_sector_percentile(0.0, breakpoints, invert=True) == 1.0
 
 
-def test_rank_route_disabled_by_default(app, client):
-    response = client.get("/api/research/rank?composite=deep_value&tickers=AAPL")
-    assert response.status_code == 403
-    assert response.get_json()["featureFlag"] == "experimental_research_composite_rank"
+def test_rank_route_available_without_feature_flag(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+
+    response = client.get("/api/research/rank?composite=deep_value&tickers=AAPL&limit=5")
+    assert response.status_code == 200
 
 
 def test_rank_deep_value_for_seeded_ticker(app, client):
     with app.app_context():
         repo = Repository(get_db())
         _seed_aapl_fundamentals(repo)
-        repo.set_config("experimental_research_composite_rank", True)
 
     response = client.get("/api/research/rank?composite=deep_value&tickers=AAPL&limit=5")
     assert response.status_code == 200
@@ -56,10 +58,6 @@ def test_rank_deep_value_for_seeded_ticker(app, client):
 
 
 def test_rank_rejects_unknown_composite(app, client):
-    with app.app_context():
-        repo = Repository(get_db())
-        repo.set_config("experimental_research_composite_rank", True)
-
     response = client.get("/api/research/rank?composite=unknown_xyz&tickers=AAPL")
     assert response.status_code == 400
     assert "Unknown composite" in response.get_json()["error"]
@@ -85,7 +83,6 @@ def test_snapshot_and_rank_history(app, client):
     with app.app_context():
         repo = Repository(get_db())
         _seed_aapl_fundamentals(repo)
-        repo.set_config("experimental_research_composite_rank", True)
 
         snapshot = snapshot_composite_ranks(
             repo,
@@ -112,15 +109,66 @@ def test_snapshot_and_rank_history(app, client):
     assert history[0]["snapshot_date"]
 
 
-def test_rank_history_disabled_by_default(app, client):
-    response = client.get("/api/research/rank/history/AAPL")
-    assert response.status_code == 403
+def test_rank_history_available_without_feature_flag(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+        snapshot_composite_ranks(
+            repo,
+            PricesService(repo),
+            composites=["deep_value"],
+            universe=None,
+        )
+
+    response = client.get("/api/research/rank/history/AAPL?composite=deep_value&limit=10")
+    assert response.status_code == 200
+
+
+def test_deep_value_includes_sentiment_divergence_with_snapshot(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+        repo.upsert_company_narrative_snapshots([
+            {
+                "ticker": "AAPL",
+                "snapshot_date": "2026-06-09",
+                "states": [{"state": "bankruptcy_fear", "score": 0.8, "articleCount": 2}],
+                "divergence_score": 0.82,
+                "divergence_signal": "rerating_candidate",
+                "emerging_situations": [],
+            }
+        ])
+
+    response = client.get("/api/research/rank?composite=deep_value&tickers=AAPL&limit=5")
+    assert response.status_code == 200
+    factors = {item["key"] for item in response.get_json()["results"][0]["factors"]}
+    assert "sentiment_divergence" in factors
 
 
 def test_rank_history_not_found(app, client):
-    with app.app_context():
-        repo = Repository(get_db())
-        repo.set_config("experimental_research_composite_rank", True)
-
     response = client.get("/api/research/rank/history/ZZZZ?composite=deep_value")
     assert response.status_code == 404
+
+
+def test_rerating_candidate_composite_preset(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+        repo.upsert_company_narrative_snapshots([
+            {
+                "ticker": "AAPL",
+                "snapshot_date": "2026-06-09",
+                "states": [{"state": "bankruptcy_fear", "score": 0.8, "articleCount": 2}],
+                "divergence_score": 0.82,
+                "divergence_signal": "rerating_candidate",
+                "emerging_situations": [],
+            }
+        ])
+
+    response = client.get("/api/research/rank?composite=rerating_candidate&tickers=AAPL&limit=5")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["meta"]["composite"] == "rerating_candidate"
+    assert payload["meta"]["label"] == "Rerating Candidate"
+    factors = {item["key"] for item in payload["results"][0]["factors"]}
+    assert "sentiment_divergence" in factors

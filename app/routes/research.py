@@ -8,7 +8,6 @@ from ..services.metric_registry import registry_for_api
 from ..services.prices import PricesService
 from ..services.research import ResearchService
 from ..services.composite_ranking import get_rank_history, run_composite_rank
-from ..services.feature_flags import is_enabled
 from ..services.screening import run_composable_screen
 from ..services.sector_stats import sector_stats_for_tickers
 
@@ -53,12 +52,6 @@ def research_screen():
 @research_bp.route("/rank", methods=["GET"])
 def research_rank():
     repo = Repository(get_db())
-    if not is_enabled("experimental_research_composite_rank", repo):
-        return jsonify({
-            "error": "Composite ranking is disabled",
-            "featureFlag": "experimental_research_composite_rank",
-        }), 403
-
     tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
     universe = request.args.get("universe", "sp500")
     composite = request.args.get("composite", "deep_value")
@@ -84,12 +77,6 @@ def research_rank():
 @research_bp.route("/rank/history/<ticker>", methods=["GET"])
 def research_rank_history(ticker: str):
     repo = Repository(get_db())
-    if not is_enabled("experimental_research_composite_rank", repo):
-        return jsonify({
-            "error": "Composite ranking is disabled",
-            "featureFlag": "experimental_research_composite_rank",
-        }), 403
-
     composite = request.args.get("composite", "deep_value")
     limit_raw = request.args.get("limit", 90)
     try:
