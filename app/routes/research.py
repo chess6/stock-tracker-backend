@@ -7,6 +7,8 @@ from ..repositories import Repository
 from ..services.metric_registry import registry_for_api
 from ..services.prices import PricesService
 from ..services.research import ResearchService
+from ..services.composite_ranking import run_composite_rank
+from ..services.feature_flags import is_enabled
 from ..services.screening import run_composable_screen
 from ..services.sector_stats import sector_stats_for_tickers
 
@@ -43,6 +45,37 @@ def research_screen():
     spec = request.get_json(silent=True) or {}
     repo = Repository(get_db())
     payload, status, error = run_composable_screen(repo, PricesService(repo), spec)
+    if error:
+        return jsonify({"error": error}), status
+    return jsonify(payload)
+
+
+@research_bp.route("/rank", methods=["GET"])
+def research_rank():
+    repo = Repository(get_db())
+    if not is_enabled("experimental_research_composite_rank", repo):
+        return jsonify({
+            "error": "Composite ranking is disabled",
+            "featureFlag": "experimental_research_composite_rank",
+        }), 403
+
+    tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    universe = request.args.get("universe", "sp500")
+    composite = request.args.get("composite", "deep_value")
+    limit_raw = request.args.get("limit", 50)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit must be an integer"}), 400
+
+    payload, status, error = run_composite_rank(
+        repo,
+        PricesService(repo),
+        composite=composite,
+        universe=universe if not tickers else None,
+        tickers=tickers or None,
+        limit=limit,
+    )
     if error:
         return jsonify({"error": error}), status
     return jsonify(payload)

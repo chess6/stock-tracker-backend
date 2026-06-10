@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 FLAG_DEFAULTS: dict[str, bool] = {
     "experimental_composite_rank": False,
+    "experimental_research_composite_rank": False,
     "embedding_heavy_retag": False,
     "experimental_signal_ranking": False,
 }

@@ -335,6 +335,15 @@ def _build_candidates(
     return candidates
 
 
+def build_research_candidates(
+    repo: Repository,
+    prices_service: PricesService,
+    tickers: list[str],
+) -> dict[str, dict]:
+    """Batch fundamentals/scores snapshot used by screening and composite ranking."""
+    return _build_candidates(repo, prices_service, tickers)
+
+
 def run_composable_screen(
     repo: Repository,
     prices_service: PricesService,
