@@ -14,6 +14,7 @@ class MetricDef(TypedDict, total=False):
     heatmap_mode: str
     danger_threshold: float | None
     excellent_threshold: float | None
+    score_type: str
     screener_supported: bool
     time_series: bool
     trend_capable: bool
@@ -259,6 +260,7 @@ METRIC_REGISTRY: dict[str, MetricDef] = {
         "api_key": "piotroskiF",
         "higher_is_better": True,
         "heatmap_mode": "score_tier",
+        "score_type": "piotroski",
         "screener_supported": True,
         "time_series": True,
         "trend_capable": False,
@@ -270,6 +272,7 @@ METRIC_REGISTRY: dict[str, MetricDef] = {
         "api_key": "altmanZ",
         "higher_is_better": True,
         "heatmap_mode": "score_tier",
+        "score_type": "altman",
         "screener_supported": True,
         "time_series": True,
         "trend_capable": False,
@@ -281,6 +284,7 @@ METRIC_REGISTRY: dict[str, MetricDef] = {
         "api_key": "beneishM",
         "higher_is_better": False,
         "heatmap_mode": "score_tier",
+        "score_type": "beneish",
         "screener_supported": True,
         "time_series": True,
         "trend_capable": False,
@@ -292,6 +296,7 @@ METRIC_REGISTRY: dict[str, MetricDef] = {
         "api_key": "survivability",
         "higher_is_better": True,
         "heatmap_mode": "score_tier",
+        "score_type": "survivability",
         "screener_supported": True,
         "time_series": True,
         "trend_capable": False,
@@ -304,10 +309,26 @@ _API_TO_CANONICAL: dict[str, str] = {
 
 
 def registry_for_api() -> list[dict[str, Any]]:
-    """Serialize registry for JSON API."""
-    items = []
-    for key, meta in METRIC_REGISTRY.items():
-        items.append({"key": key, **meta})
+    """Serialize registry for JSON API (stable key order for snapshot tests)."""
+    items: list[dict[str, Any]] = []
+    for key in sorted(METRIC_REGISTRY.keys()):
+        meta = METRIC_REGISTRY[key]
+        item: dict[str, Any] = {
+            "key": key,
+            "category": meta.get("category"),
+            "label": meta.get("label"),
+            "format": meta.get("format"),
+            "api_key": meta.get("api_key"),
+            "higher_is_better": meta.get("higher_is_better", True),
+            "heatmap_mode": meta.get("heatmap_mode"),
+            "danger_threshold": meta.get("danger_threshold"),
+            "excellent_threshold": meta.get("excellent_threshold"),
+            "score_type": meta.get("score_type"),
+            "screener_supported": meta.get("screener_supported", False),
+            "time_series": meta.get("time_series", False),
+            "trend_capable": meta.get("trend_capable", False),
+        }
+        items.append(item)
     return items
 
 

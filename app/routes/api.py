@@ -255,10 +255,18 @@ def update_preferences():
     body = request.get_json(silent=True) or {}
     theme = body.get("theme")
     portfolio = body.get("portfolio")
+    research_color_mode = body.get("researchColorMode")
+    research_heat_legend = body.get("researchHeatLegend")
     if theme is not None and theme not in {"dark", "light"}:
         return jsonify({"error": "theme must be 'dark' or 'light'"}), 400
     if portfolio is not None and not isinstance(portfolio, list):
         return jsonify({"error": "portfolio must be an array of tickers"}), 400
+    if research_color_mode is not None and research_color_mode not in {
+        "deep_value", "historical", "sector",
+    }:
+        return jsonify({"error": "researchColorMode must be deep_value, historical, or sector"}), 400
+    if research_heat_legend is not None and not isinstance(research_heat_legend, bool):
+        return jsonify({"error": "researchHeatLegend must be a boolean"}), 400
     normalized_portfolio = None
     if portfolio is not None:
         normalized_portfolio = [
@@ -270,6 +278,8 @@ def update_preferences():
         payload = get_repo().update_user_preferences(
             theme=theme,
             portfolio=normalized_portfolio,
+            research_color_mode=research_color_mode,
+            research_heat_legend=research_heat_legend,
         )
     except Exception as exc:
         current_app.logger.exception("Failed to update preferences")

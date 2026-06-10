@@ -156,6 +156,18 @@ class Repository:
         ).fetchone()
         return dict(row) if row else None
 
+    def fetch_sector_tickers(self, sector: str, limit: int = 150) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT ticker FROM companies
+            WHERE sector = ? AND ticker IS NOT NULL AND TRIM(ticker) != ''
+            ORDER BY ticker
+            LIMIT ?
+            """,
+            (sector, limit),
+        ).fetchall()
+        return [row["ticker"] for row in rows]
+
     def update_company_metadata(self, ticker: str, metadata: dict) -> None:
         self.conn.execute(
             """
@@ -1813,35 +1825,78 @@ class Repository:
 
     def get_user_preferences(self) -> dict:
         row = self.conn.execute(
-            "SELECT theme FROM user_preferences WHERE id = 1",
+            "SELECT theme, ui_prefs_json FROM user_preferences WHERE id = 1",
         ).fetchone()
         theme = row["theme"] if row else "dark"
+        ui_prefs = self._parse_ui_prefs(row["ui_prefs_json"] if row else None)
         wl = self.get_watchlist("Portfolio")
         tickers = (wl or {}).get("tickers", [])
-        return {"theme": theme, "portfolio": tickers}
+        return {
+            "theme": theme,
+            "portfolio": tickers,
+            "researchColorMode": ui_prefs.get("researchColorMode", "deep_value"),
+            "researchHeatLegend": ui_prefs.get("researchHeatLegend", True),
+        }
+
+    @staticmethod
+    def _parse_ui_prefs(raw: str | None) -> dict:
+        if not raw:
+            return {}
+        try:
+            import json
+
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError):
+            return {}
 
     def update_user_preferences(
         self,
         *,
         theme: str | None = None,
         portfolio: list[str] | None = None,
+        research_color_mode: str | None = None,
+        research_heat_legend: bool | None = None,
     ) -> dict:
         if theme is not None:
             self.conn.execute(
                 """
-                INSERT INTO user_preferences (id, theme)
-                VALUES (1, ?)
+                INSERT INTO user_preferences (id, theme, ui_prefs_json)
+                VALUES (1, ?, '{}')
                 ON CONFLICT(id) DO UPDATE SET
                     theme = excluded.theme,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (theme,),
             )
+        ui_updates: dict = {}
+        if research_color_mode is not None:
+            ui_updates["researchColorMode"] = research_color_mode
+        if research_heat_legend is not None:
+            ui_updates["researchHeatLegend"] = research_heat_legend
+        if ui_updates:
+            current = self.get_user_preferences()
+            merged = {
+                "researchColorMode": current.get("researchColorMode", "deep_value"),
+                "researchHeatLegend": current.get("researchHeatLegend", True),
+            }
+            merged.update(ui_updates)
+            import json
+
+            self.conn.execute(
+                """
+                INSERT INTO user_preferences (id, theme, ui_prefs_json)
+                VALUES (1, 'dark', ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    ui_prefs_json = excluded.ui_prefs_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (json.dumps(merged),),
+            )
         if portfolio is not None:
             wl_id = self.upsert_watchlist("Portfolio", description="Default portfolio watchlist")
             self.set_watchlist_tickers(wl_id, portfolio)
-        else:
-            self.conn.commit()
+        self.conn.commit()
         return self.get_user_preferences()
 
     # -- jobs ---------------------------------------------------------------

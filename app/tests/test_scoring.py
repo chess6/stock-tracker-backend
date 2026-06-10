@@ -12,6 +12,16 @@ from app.services.scoring import (
     compute_survivability,
     survivability_bucket,
 )
+from app.services.verification_spec import (
+    GOLDEN_CURRENT_ROW,
+    GOLDEN_EXPECTED_LATEST,
+    GOLDEN_PRICES_BY_PERIOD,
+    GOLDEN_PRIOR_ROW,
+    GOLDEN_TOLERANCE,
+    SEED_TICKER_SPECS,
+    score_within_range,
+    score_within_tolerance,
+)
 
 
 def _base_row(**overrides) -> dict:
@@ -149,6 +159,94 @@ def test_survivability_strong_company_scores_high():
     assert score is not None
     assert score >= 70
     assert bucket in {"stable", "strong"}
+
+
+def test_golden_fixture_scores_match_baseline():
+    records = compute_scores_for_periods(
+        [GOLDEN_CURRENT_ROW, GOLDEN_PRIOR_ROW],
+        prices_by_period=GOLDEN_PRICES_BY_PERIOD,
+    )
+    latest = records[0]
+    assert latest["period_end"] == GOLDEN_EXPECTED_LATEST["period_end"]
+    for metric, expected in GOLDEN_EXPECTED_LATEST.items():
+        if metric == "period_end":
+            continue
+        tol = GOLDEN_TOLERANCE[metric]
+        assert score_within_tolerance(
+            latest[metric],
+            expected,
+            rel_tol=tol["rel"],
+            abs_tol=tol["abs"],
+        ), f"{metric} drift: {latest[metric]} vs {expected}"
+
+
+def test_altman_z_returns_none_for_zero_assets_or_liabilities():
+    row = _base_row(assets=0, liabilities=900.0)
+    z, components = compute_altman_z(row, market_cap=1000.0)
+    assert z is None
+    assert components == {}
+
+    row = _base_row(assets=2000.0, liabilities=0)
+    z, components = compute_altman_z(row, market_cap=1000.0)
+    assert z is None
+    assert components == {}
+
+
+def test_altman_z_returns_none_when_core_ratios_missing():
+    row = _base_row(workingcapital=None, assetscurrent=None, liabilitiescurrent=None, retearn=None, ebit=None, revenue=None)
+    z, components = compute_altman_z(row, market_cap=1000.0)
+    assert z is None
+    assert components == {}
+
+
+def test_beneish_m_returns_none_for_zero_revenue_or_assets():
+    current = _base_row(revenue=0)
+    prior = _base_row(calendardate="2023-12-31", revenue=900.0)
+    m, components = compute_beneish_m(current, prior)
+    assert m is None
+    assert components == {}
+
+    current = _base_row(assets=0)
+    prior = _base_row(calendardate="2023-12-31")
+    m, components = compute_beneish_m(current, prior)
+    assert m is None
+    assert components == {}
+
+
+def test_survivability_returns_none_without_usable_inputs():
+    row = {
+        "cashneq": None,
+        "ebit": None,
+        "opinc": None,
+        "interestexp": None,
+        "equity": None,
+    }
+    score, bucket = compute_survivability(row)
+    assert score is None
+    assert bucket is None
+
+
+def test_compute_scores_for_periods_skips_piotroski_without_prior():
+    rows = [_base_row(calendardate="2024-12-31")]
+    records = compute_scores_for_periods(rows, prices_by_period={"2024-12-31": 10.0})
+    assert len(records) == 1
+    assert records[0]["piotroski_f"] is None
+    assert records[0]["beneish_m"] is None
+    assert records[0]["altman_z"] is not None
+
+
+def test_seed_ticker_specs_are_well_formed():
+    assert len(SEED_TICKER_SPECS) >= 4
+    for spec in SEED_TICKER_SPECS:
+        assert spec["ticker"]
+        assert spec["metrics"]
+        for metric_spec in spec["metrics"].values():
+            if metric_spec.get("nullable"):
+                continue
+            assert "min" in metric_spec and "max" in metric_spec
+            assert metric_spec["min"] <= metric_spec["max"]
+            if "value" in metric_spec:
+                assert score_within_range(metric_spec["value"], metric_spec)
 
 
 def test_compute_scores_for_periods_produces_history():
@@ -298,6 +396,9 @@ def test_refresh_fundamentals_persists_company_scores(app):
         def upsert_company_scores(self, company_id, records):
             self.scores.extend(records)
             return len(records)
+
+        def delete_fundamentals_snapshots(self, company_id, dimensions):
+            return None
 
     class FakeSecClient:
         def fetch_company_facts(self, cik: str) -> dict:
@@ -565,6 +666,8 @@ def test_research_routes_return_screener_and_ticker_payload(app, client):
     assert detail_payload["ticker"] == "AAPL"
     assert len(detail_payload["periods"]) >= 1
     assert len(detail_payload["scoreHistory"]) >= 1
+    assert "metricTrends" in detail_payload
+    assert isinstance(detail_payload["metricTrends"], dict)
 
 
 def test_research_insider_routes(app, client):

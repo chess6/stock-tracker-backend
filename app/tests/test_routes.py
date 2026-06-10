@@ -191,3 +191,17 @@ def test_preferences_round_trip(app, client):
     reload_response = client.get("/api/preferences")
     assert reload_response.status_code == 200
     assert reload_response.get_json() == payload
+
+
+def test_preferences_research_ui_round_trip(client):
+    response = client.put(
+        "/api/preferences",
+        json={"researchColorMode": "historical", "researchHeatLegend": False},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["researchColorMode"] == "historical"
+    assert payload["researchHeatLegend"] is False
+
+    bad = client.put("/api/preferences", json={"researchColorMode": "invalid"})
+    assert bad.status_code == 400

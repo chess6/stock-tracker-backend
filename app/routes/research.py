@@ -7,6 +7,7 @@ from ..repositories import Repository
 from ..services.metric_registry import registry_for_api
 from ..services.prices import PricesService
 from ..services.research import ResearchService
+from ..services.sector_stats import sector_stats_for_tickers
 
 research_bp = Blueprint("research", __name__, url_prefix="/api/research")
 
@@ -19,6 +20,21 @@ def get_research_service() -> ResearchService:
 @research_bp.route("/metrics/registry", methods=["GET"])
 def research_metrics_registry():
     return jsonify({"metrics": registry_for_api()})
+
+
+@research_bp.route("/metrics/sector-stats", methods=["GET"])
+def research_sector_stats():
+    tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    sectors = [item.strip() for item in request.args.get("sectors", "").split(",") if item.strip()]
+    metrics = [item.strip() for item in request.args.get("metrics", "").split(",") if item.strip()]
+    repo = Repository(get_db())
+    if tickers:
+        payload = sector_stats_for_tickers(repo, tickers, metric_api_keys=metrics or None)
+    else:
+        from ..services.sector_stats import build_sector_stats
+
+        payload = build_sector_stats(repo, sectors=sectors or None, metric_api_keys=metrics or None)
+    return jsonify(payload)
 
 
 @research_bp.route("/screener", methods=["GET"])

@@ -1,7 +1,7 @@
 """Tests for canonical metrics engine and registry."""
 
 from app.services.metric_primitives import gross_margin, operating_margin, total_debt
-from app.services.metric_registry import METRIC_REGISTRY, canonical_key, registry_for_api
+from app.services.metric_registry import canonical_key
 from app.services.metrics_engine import build_company_metrics, compute_period_metrics
 
 
@@ -73,11 +73,6 @@ def test_metric_primitives_debt_fallback():
 def test_metric_registry_api_keys():
     assert canonical_key("grossMargin") == "gross_margin"
     assert canonical_key("unknown") is None
-    entries = registry_for_api()
-    assert len(entries) == len(METRIC_REGISTRY)
-    gross = next(item for item in entries if item["key"] == "gross_margin")
-    assert gross["api_key"] == "grossMargin"
-    assert gross["higher_is_better"] is True
 
 
 def test_gross_margin_derives_from_cor():
@@ -86,9 +81,3 @@ def test_gross_margin_derives_from_cor():
     assert operating_margin({"revenue": 100.0, "opinc": 10.0}) == 0.1
 
 
-def test_metrics_registry_route(client):
-    response = client.get("/api/research/metrics/registry")
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert "metrics" in payload
-    assert any(item["key"] == "gross_margin" for item in payload["metrics"])

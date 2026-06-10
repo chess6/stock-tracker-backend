@@ -440,6 +440,11 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     for column, col_type in feed_migrations.items():
         if column not in feed_cols:
             conn.execute(f"ALTER TABLE feeds ADD COLUMN {column} {col_type}")
+    pref_cols = {row[1] for row in conn.execute("PRAGMA table_info(user_preferences)").fetchall()}
+    if "ui_prefs_json" not in pref_cols:
+        conn.execute(
+            "ALTER TABLE user_preferences ADD COLUMN ui_prefs_json TEXT NOT NULL DEFAULT '{}'",
+        )
     conn.commit()
 
 

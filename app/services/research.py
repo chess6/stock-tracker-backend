@@ -14,6 +14,8 @@ from .fundamentals import (
     resolve_financial_dimension,
 )
 from .prices import PricesService
+from .metric_registry import METRIC_REGISTRY
+from .metric_trends import build_metric_trends
 from .scoring import margin_trend_delta, share_dilution_rate, _gross_margin, _operating_margin
 from .insider_analysis import (
     analyze_insider_activity,
@@ -177,11 +179,19 @@ class ResearchService:
         insiders = self.repo.fetch_insider_transactions(symbol, limit=500)
         insider_detail = self.get_insider_detail(symbol)
 
+        trend_keys = [
+            meta["api_key"]
+            for meta in METRIC_REGISTRY.values()
+            if meta.get("api_key") and meta.get("trend_capable")
+        ]
+        metric_trends = build_metric_trends(periods, trend_keys)
+
         return {
             "ticker": symbol,
             "company": company,
             "dimension": (dimension or "MRY").upper(),
             "periods": periods,
+            "metricTrends": metric_trends,
             "scoreHistory": score_history,
             "insiders": insiders,
             "insiderAnalysis": insider_detail,
