@@ -2144,6 +2144,49 @@ class Repository:
         )
         self.conn.commit()
 
+    def get_company_tags_map(self) -> dict[str, list[str]]:
+        rows = self.conn.execute(
+            """
+            SELECT ticker, tag
+            FROM company_tags
+            ORDER BY ticker, rowid ASC
+            """
+        ).fetchall()
+        out: dict[str, list[str]] = {}
+        for row in rows:
+            ticker = row["ticker"]
+            out.setdefault(ticker, []).append(row["tag"])
+        return out
+
+    def replace_company_tags(self, ticker_tags: dict[str, list[str]]) -> dict[str, list[str]]:
+        self.conn.execute("DELETE FROM company_tags")
+        rows = [
+            (ticker, tag)
+            for ticker, tags in sorted(ticker_tags.items())
+            for tag in tags
+        ]
+        if rows:
+            self.conn.executemany(
+                "INSERT INTO company_tags (ticker, tag) VALUES (?, ?)",
+                rows,
+            )
+        self.conn.commit()
+        return ticker_tags
+
+    def set_ticker_company_tags(self, ticker: str, tags: list[str]) -> list[str]:
+        normalized_ticker = ticker.strip().upper()
+        self.conn.execute(
+            "DELETE FROM company_tags WHERE ticker = ?",
+            (normalized_ticker,),
+        )
+        if tags:
+            self.conn.executemany(
+                "INSERT INTO company_tags (ticker, tag) VALUES (?, ?)",
+                [(normalized_ticker, tag) for tag in tags],
+            )
+        self.conn.commit()
+        return tags
+
     def _load_ui_prefs_dict(self) -> dict:
         row = self.conn.execute(
             "SELECT ui_prefs_json FROM user_preferences WHERE id = 1",

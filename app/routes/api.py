@@ -313,6 +313,50 @@ def update_preferences():
     return jsonify(payload)
 
 
+# -- company tags (user-facing, no admin auth) -----------------------------
+
+
+@api_bp.route("/company-tags", methods=["GET"])
+def get_company_tags():
+    return jsonify({
+        "tickerTags": get_repo().get_company_tags_map(),
+        "source": "sqlite",
+    })
+
+
+@api_bp.route("/company-tags", methods=["PUT"])
+def put_company_tags():
+    from ..services.company_tags import (
+        dedupe_tags,
+        normalize_ticker,
+        sanitize_ticker_tags_map,
+    )
+
+    body = request.get_json(silent=True) or {}
+    repo = get_repo()
+
+    if "tickerTags" in body:
+        if not isinstance(body["tickerTags"], dict):
+            return jsonify({"error": "tickerTags must be an object"}), 400
+        ticker_tags = sanitize_ticker_tags_map(body["tickerTags"])
+        repo.replace_company_tags(ticker_tags)
+        return jsonify({"tickerTags": ticker_tags, "source": "sqlite"})
+
+    ticker = normalize_ticker(body.get("ticker") or "")
+    tags = body.get("tags")
+    if ticker and isinstance(tags, list):
+        normalized_tags = dedupe_tags(tags)
+        repo.set_ticker_company_tags(ticker, normalized_tags)
+        return jsonify({
+            "ticker": ticker,
+            "tags": normalized_tags,
+            "tickerTags": repo.get_company_tags_map(),
+            "source": "sqlite",
+        })
+
+    return jsonify({"error": "Provide tickerTags or ticker+tags"}), 400
+
+
 # -- watchlists (user-facing, no admin auth) -------------------------------
 
 

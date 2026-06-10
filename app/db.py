@@ -201,6 +201,15 @@ CREATE TABLE IF NOT EXISTS watchlist_tickers (
     FOREIGN KEY (watchlist_id) REFERENCES watchlists(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS company_tags (
+    ticker TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (ticker, tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_company_tags_tag ON company_tags(tag);
+
 CREATE TABLE IF NOT EXISTS user_preferences (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     theme TEXT NOT NULL DEFAULT 'dark',
@@ -501,6 +510,20 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
             WHERE fetched_at IS NULL OR fetched_at = ''
             """
         )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS company_tags (
+            ticker TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ticker, tag)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_company_tags_tag ON company_tags(tag)"
+    )
 
     conn.commit()
 

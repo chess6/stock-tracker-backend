@@ -33,5 +33,6 @@ def test_pipeline_tables_migrate(tmp_path):
         assert "scoring_version" in scores_cols
         prices_cols = {row[1] for row in conn.execute("PRAGMA table_info(prices)").fetchall()}
         assert "fetched_at" in prices_cols
+        assert "company_tags" in tables
     finally:
         conn.close()
