@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from app.services.fundamentals import (
+    CANONICAL_ANNUAL_MIN_STATEMENT_METRICS,
     collapse_narrow_fundamentals_rows,
+    filter_canonical_annual_wide_rows,
     pivot_fundamentals_rows,
     resolve_financial_dimension,
 )
@@ -336,8 +338,8 @@ def test_refresh_fundamentals_continues_after_sec_404():
         def upsert_company_scores(self, company_id, records):
             return 0
 
-        def fetch_price_near_date(self, ticker, target_date):
-            return None
+        def fetch_prices_by_period_ends(self, ticker, period_ends):
+            return {period[:10]: None for period in period_ends if period}
 
         def update_company_metadata(self, ticker, meta):
             return None
@@ -385,8 +387,8 @@ def test_refresh_fundamentals_skips_etf_before_sec_call():
         def upsert_company_scores(self, company_id, records):
             return 0
 
-        def fetch_price_near_date(self, ticker, target_date):
-            return None
+        def fetch_prices_by_period_ends(self, ticker, period_ends):
+            return {period[:10]: None for period in period_ends if period}
 
         def update_company_metadata(self, ticker, meta):
             return None
@@ -508,3 +510,210 @@ def test_collapse_narrow_annual_prefers_full_year_revenue_snapshot():
     assert len(collapsed) == 1
     assert collapsed[0]["period_end"] == "2016-09-24"
     assert collapsed[0]["value"] == 215_000_000_000
+
+
+def _aapl_fy_row(period_end: str, fiscal_year: int, revenue: float, **metrics: float) -> list[dict]:
+    base = {
+        "ticker": "AAPL",
+        "company_name": "Apple Inc.",
+        "period_end": period_end,
+        "period_type": "annual",
+        "dimension": "ARY",
+        "fiscal_year": fiscal_year,
+        "fiscal_quarter": "FY",
+        "filing_date": f"{fiscal_year}-10-31",
+    }
+    rows = [
+        {**base, "metric": "revenue", "value": revenue},
+        {**base, "metric": "netinc", "value": revenue * 0.25},
+        {**base, "metric": "assets", "value": revenue * 2},
+        {**base, "metric": "liabilities", "value": revenue},
+        {**base, "metric": "ncfo", "value": revenue * 0.3},
+        {**base, "metric": "eps", "value": 12.3},
+        {**base, "metric": "gp", "value": revenue * 0.4},
+        {**base, "metric": "opinc", "value": revenue * 0.3},
+        {**base, "metric": "cashneq", "value": revenue * 0.2},
+    ]
+    for metric, value in metrics.items():
+        rows.append({**base, "metric": metric, "value": value})
+    return rows
+
+
+def test_filter_canonical_annual_wide_rows_drops_interim_orphans():
+    collapsed = collapse_narrow_fundamentals_rows(
+        _aapl_fy_row("2012-09-29", 2012, 156_000_000_000, debt=0.0)
+        + [
+            {
+                "ticker": "AAPL",
+                "company_name": "Apple Inc.",
+                "metric": "eps",
+                "value": 12.3,
+                "period_end": "2012-03-31",
+                "period_type": "annual",
+                "dimension": "ARY",
+                "fiscal_year": 2012,
+                "fiscal_quarter": "Q2",
+                "filing_date": "2012-05-01",
+            },
+            {
+                "ticker": "AAPL",
+                "company_name": "Apple Inc.",
+                "metric": "ncfdiv",
+                "value": 2_500_000_000,
+                "period_end": "2011-12-31",
+                "period_type": "annual",
+                "dimension": "ARY",
+                "fiscal_year": 2011,
+                "fiscal_quarter": "Q1",
+                "filing_date": "2012-02-01",
+            },
+        ],
+        annual=True,
+    )
+    wide_rows = pivot_fundamentals_rows(collapsed)
+    dates_before = {row["calendardate"] for row in wide_rows}
+    assert "2012-09-29" in dates_before
+    assert "2011-12-31" in dates_before
+    assert len(dates_before) > 1
+
+    canonical = filter_canonical_annual_wide_rows(wide_rows)
+    dates = {row["calendardate"] for row in canonical}
+    assert dates == {"2012-09-29"}
+    assert canonical[0]["revenue"] == 156_000_000_000
+
+
+def test_pivot_canonical_annual_drops_interim_orphan_columns():
+    collapsed = collapse_narrow_fundamentals_rows(
+        _aapl_fy_row("2012-09-29", 2012, 156_000_000_000)
+        + _aapl_fy_row("2011-09-24", 2011, 108_000_000_000)
+        + [
+            {
+                "ticker": "AAPL",
+                "company_name": "Apple Inc.",
+                "metric": "eps",
+                "value": 12.3,
+                "period_end": "2012-03-31",
+                "period_type": "annual",
+                "dimension": "ARY",
+                "fiscal_year": 2012,
+                "fiscal_quarter": "Q2",
+                "filing_date": "2012-05-01",
+            },
+            {
+                "ticker": "AAPL",
+                "company_name": "Apple Inc.",
+                "metric": "ncfdiv",
+                "value": 2_500_000_000,
+                "period_end": "2011-12-31",
+                "period_type": "annual",
+                "dimension": "ARY",
+                "fiscal_year": 2011,
+                "fiscal_quarter": "Q1",
+                "filing_date": "2012-02-01",
+            },
+        ],
+        annual=True,
+    )
+    wide_rows = pivot_fundamentals_rows(collapsed, canonical_annual=True)
+    dates = [row["calendardate"] for row in wide_rows]
+    assert dates == ["2012-09-29", "2011-09-24"]
+    assert all(row.get("revenue") is not None for row in wide_rows)
+    assert all(
+        sum(1 for metric in ("revenue", "netinc", "assets", "liabilities", "ncfo", "gp", "opinc", "cashneq")
+            if row.get(metric) is not None) >= CANONICAL_ANNUAL_MIN_STATEMENT_METRICS
+        for row in wide_rows
+    )
+
+
+def test_filter_canonical_annual_keeps_distinct_periods_when_fiscal_year_restatement_tags_overlap():
+    """SEC restatements can tag multiple period_end dates with the same fiscal_year."""
+    wide_rows = [
+        {
+            "ticker": "AAPL",
+            "calendardate": "2025-09-27",
+            "dimension": "ARY",
+            "_fiscal_year": 2025,
+            "revenue": 416_000_000_000,
+            "netinc": 100_000_000_000,
+            "assets": 800_000_000_000,
+            "liabilities": 400_000_000_000,
+            "ncfo": 120_000_000_000,
+            "gp": 180_000_000_000,
+            "opinc": 130_000_000_000,
+            "cashneq": 50_000_000_000,
+            "eps": 2.5,
+        },
+        {
+            "ticker": "AAPL",
+            "calendardate": "2024-09-28",
+            "dimension": "ARY",
+            "_fiscal_year": 2025,
+            "revenue": 391_000_000_000,
+            "netinc": 95_000_000_000,
+            "assets": 750_000_000_000,
+            "liabilities": 380_000_000_000,
+            "ncfo": 110_000_000_000,
+            "gp": 170_000_000_000,
+            "opinc": 120_000_000_000,
+            "cashneq": 45_000_000_000,
+            "eps": 2.3,
+        },
+    ]
+    canonical = filter_canonical_annual_wide_rows(wide_rows)
+    assert {row["calendardate"] for row in canonical} == {"2025-09-27", "2024-09-28"}
+
+
+def test_research_ticker_detail_annual_periods_are_canonical(client):
+    from app.db import get_db
+    from app.repositories import Repository
+
+    with client.application.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "AAPL", "name": "Apple Inc", "cik": "0000320193"}])
+        company = repo.get_company_by_ticker("AAPL")
+        assert company is not None
+        records = []
+        for narrow in collapse_narrow_fundamentals_rows(
+            _aapl_fy_row("2012-09-29", 2012, 156_000_000_000)
+            + _aapl_fy_row("2011-09-24", 2011, 108_000_000_000)
+            + [
+                {
+                    "ticker": "AAPL",
+                    "company_name": "Apple Inc.",
+                    "metric": "eps",
+                    "value": 12.3,
+                    "period_end": "2012-03-31",
+                    "period_type": "annual",
+                    "dimension": "ARY",
+                    "fiscal_year": 2012,
+                    "fiscal_quarter": "Q2",
+                    "filing_date": "2012-05-01",
+                },
+            ],
+            annual=True,
+        ):
+            records.append(
+                {
+                    "company_id": company["id"],
+                    "metric": narrow["metric"],
+                    "value": narrow["value"],
+                    "unit": None,
+                    "period_end": narrow["period_end"],
+                    "period_type": narrow["period_type"],
+                    "dimension": narrow["dimension"],
+                    "fiscal_year": narrow.get("fiscal_year"),
+                    "fiscal_quarter": narrow.get("fiscal_quarter"),
+                    "filing_date": narrow.get("filing_date"),
+                    "form": "10-K",
+                    "accession": "test",
+                    "source": "test",
+                }
+            )
+        repo.upsert_fundamentals(records)
+
+    response = client.get("/api/research/ticker/AAPL?dimension=ARY")
+    assert response.status_code == 200
+    payload = response.get_json()
+    period_ends = [period["periodEnd"] for period in payload["periods"]]
+    assert period_ends == ["2012-09-29", "2011-09-24"]
+    assert "2012-03-31" not in period_ends

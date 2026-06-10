@@ -30,6 +30,18 @@ return jsonify({"error": str(exc)}), 500
 - Request-time routes read SQLite first; Nasdaq only as optional fallback.
 - Long ETL (feeds, SEC bulk) belongs in worker jobs or bootstrap, not blocking reads.
 
+## Queries & performance
+
+- No N+1 patterns: batch reads in repositories; never query per ticker/row inside route handlers or loops.
+- Profile with `EXPLAIN QUERY PLAN` before adding indexes or cache tables.
+- Do not add materialized-cache tables or snapshot stores without measured need — SQLite-first simplicity.
+
+## Metrics & scoring
+
+- Canonical logic: `metric_registry.py`, `scoring.py`, `metrics_engine.py` — not ad-hoc formulas in routes or repositories.
+- API responses expose computed scores; frontend must not re-implement composites.
+- Scoring changes: run `test_scoring.py`, `test_metrics_engine.py`; see `scripts/validate_scores.py` for golden tickers.
+
 ## Tests
 
 - Fixtures: `app`, `client` from `app/tests/conftest.py`

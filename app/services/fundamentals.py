@@ -80,6 +80,9 @@ STATEMENT_METRICS = frozenset(
     }
 )
 
+# Full fiscal-year 10-K rows typically carry many statement metrics; interim 8-K orphans do not.
+CANONICAL_ANNUAL_MIN_STATEMENT_METRICS = 8
+
 
 def _dedupe_narrow_rows(rows: list[dict]) -> list[dict]:
     latest: dict[tuple, dict] = {}
@@ -131,7 +134,41 @@ def collapse_narrow_fundamentals_rows(rows: list[dict], *, annual: bool) -> list
     return list(buckets.values())
 
 
-def pivot_fundamentals_rows(rows: list[dict]) -> list[dict]:
+def _statement_metric_count(wide_row: dict) -> int:
+    return sum(1 for metric in STATEMENT_METRICS if wide_row.get(metric) is not None)
+
+
+def _canonical_annual_rank(wide_row: dict) -> tuple:
+    return (
+        _statement_metric_count(wide_row),
+        wide_row.get("calendardate") or "",
+        wide_row.get("filingdate") or "",
+    )
+
+
+def filter_canonical_annual_wide_rows(wide_rows: list[dict]) -> list[dict]:
+    """Keep full fiscal-year statement columns; drop interim 8-K orphan snapshots."""
+    selected: dict[tuple[str, str], dict] = {}
+
+    for row in wide_rows:
+        if row.get("revenue") is None:
+            continue
+        if _statement_metric_count(row) < CANONICAL_ANNUAL_MIN_STATEMENT_METRICS:
+            continue
+        bucket_key = (row.get("ticker") or "", row.get("calendardate") or "")
+        current = selected.get(bucket_key)
+        if current is None or _canonical_annual_rank(row) > _canonical_annual_rank(current):
+            selected[bucket_key] = row
+
+    filtered = list(selected.values())
+    filtered.sort(
+        key=lambda item: (item.get("ticker") or "", item.get("calendardate") or ""),
+        reverse=True,
+    )
+    return filtered
+
+
+def pivot_fundamentals_rows(rows: list[dict], *, canonical_annual: bool = False) -> list[dict]:
     """Pivot narrow fundamentals into wide-row period layout.
 
     SEC CompanyFacts uses different period_end dates for shares (DEI snapshot)
@@ -234,6 +271,9 @@ def pivot_fundamentals_rows(rows: list[dict]) -> list[dict]:
             if fallback is not None:
                 wide_row["sharesbas"] = fallback[1]
         wide_rows.append(wide_row)
+
+    if canonical_annual:
+        wide_rows = filter_canonical_annual_wide_rows(wide_rows)
 
     wide_rows = sorted(
         wide_rows,
@@ -536,15 +576,15 @@ class FundamentalsService:
         }
 
     def _refresh_company_scores(self, company_id: int, ticker: str) -> int:
-        rows = self.repo.fetch_fundamentals_rows([ticker], dimension="ARY")
-        annual_rows = pivot_fundamentals_rows(rows)
+        rows = collapse_narrow_fundamentals_rows(
+            self.repo.fetch_fundamentals_rows([ticker], dimension="ARY"),
+            annual=True,
+        )
+        annual_rows = pivot_fundamentals_rows(rows, canonical_annual=True)
         if not annual_rows:
             return 0
-        prices_by_period: dict[str, float | None] = {}
-        for row in annual_rows:
-            period_end = row.get("calendardate")
-            if period_end:
-                prices_by_period[period_end] = self.repo.fetch_price_near_date(ticker, period_end)
+        period_ends = [row.get("calendardate") for row in annual_rows if row.get("calendardate")]
+        prices_by_period = self.repo.fetch_prices_by_period_ends(ticker, period_ends)
         score_records = compute_scores_for_periods(annual_rows, prices_by_period=prices_by_period)
         db_records = [
             {
@@ -569,10 +609,15 @@ class FundamentalsService:
         records: list[dict] = []
 
         annual_rows = pivot_fundamentals_rows(
-            self.repo.fetch_fundamentals_rows([ticker], dimension="ARY")
+            collapse_narrow_fundamentals_rows(
+                self.repo.fetch_fundamentals_rows([ticker], dimension="ARY"),
+                annual=True,
+            ),
         )
         if annual_rows:
-            latest_annual = max(annual_rows, key=lambda row: row.get("calendardate") or "")
+            canonical_rows = filter_canonical_annual_wide_rows(annual_rows)
+            source_rows = canonical_rows or annual_rows
+            latest_annual = max(source_rows, key=lambda row: row.get("calendardate") or "")
             records.extend(
                 wide_row_to_fundamental_records(company_id, latest_annual, target_dimension="MRY")
             )
@@ -599,7 +644,7 @@ class FundamentalsService:
         logger.debug("materialize_snapshot_dimensions ticker=%s records=%d", ticker, written)
         return written
 
-    def refresh_company_scores_batch(self, tickers: list[str] | None = None) -> dict:
+    def refresh_company_scores_batch(self, tickers: list[str] | None = None, *, verbose: bool = False) -> dict:
         """Recompute materialized scores for tickers or all companies with annual fundamentals."""
         if tickers:
             target = [item.strip().upper() for item in tickers if item and str(item).strip()]
@@ -609,13 +654,37 @@ class FundamentalsService:
         t0 = time.monotonic()
         refreshed: list[str] = []
         skipped: list[dict] = []
+        ticker_timings: list[dict] = []
         periods_written = 0
         for ticker in target:
             company = self.repo.get_company_by_ticker(ticker)
             if not company:
                 skipped.append({"ticker": ticker, "reason": "not_found"})
                 continue
+            t_ticker = time.monotonic()
             written = self._refresh_company_scores(company["id"], ticker)
+            ticker_elapsed = time.monotonic() - t_ticker
+            ticker_timings.append(
+                {
+                    "ticker": ticker,
+                    "periods": written,
+                    "elapsedSec": round(ticker_elapsed, 3),
+                }
+            )
+            if verbose:
+                logger.info(
+                    "refresh_company_scores_batch ticker=%s periods=%d elapsed=%.3fs",
+                    ticker,
+                    written,
+                    ticker_elapsed,
+                )
+            else:
+                logger.debug(
+                    "refresh_company_scores_batch ticker=%s periods=%d elapsed=%.3fs",
+                    ticker,
+                    written,
+                    ticker_elapsed,
+                )
             if written:
                 refreshed.append(ticker)
                 periods_written += written
@@ -633,6 +702,8 @@ class FundamentalsService:
             "tickers": refreshed,
             "periodsWritten": periods_written,
             "skipped": skipped,
+            "tickerTimings": ticker_timings,
+            "elapsedSec": round(elapsed, 3),
         }
 
     def enrich_company_metadata(self, tickers: list[str] | None = None, *, all_missing: bool = False) -> dict:

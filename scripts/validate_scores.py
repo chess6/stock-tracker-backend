@@ -86,11 +86,8 @@ def validate_db_seeds(database_path: str | None = None) -> list[str]:
                 failures.append(f"{ticker}: no ARY fundamentals")
                 continue
 
-            prices_by_period: dict[str, float | None] = {}
-            for row in annual_rows:
-                period_end = row.get("calendardate")
-                if period_end:
-                    prices_by_period[period_end] = repo.fetch_price_near_date(ticker, period_end)
+            period_ends = [row.get("calendardate") for row in annual_rows if row.get("calendardate")]
+            prices_by_period = repo.fetch_prices_by_period_ends(ticker, period_ends)
 
             records = compute_scores_for_periods(annual_rows, prices_by_period=prices_by_period)
             if not records:

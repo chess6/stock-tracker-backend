@@ -18,6 +18,9 @@ from .metric_primitives import (
 
 logger = logging.getLogger("stock_tracker.scoring")
 
+# Canonical numeric scoring lives here. Display tiers and heatmap metadata are in
+# metric_registry.py (score_type, heatmap_mode); do not duplicate score bands elsewhere.
+
 
 def compute_piotroski_f(current: dict, prior: dict) -> tuple[int | None, dict[str, int]]:
     """Nine-point Piotroski F-score from two consecutive annual wide rows."""

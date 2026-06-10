@@ -94,9 +94,13 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
 
     def enrich_articles(payload: dict) -> dict:
         from ..services.article_pipeline import ArticlePipeline
+        from ..services.feature_flags import embeddings_default_enabled
 
         limit = int(payload.get("limit", 50))
-        enable_embeddings = payload.get("enable_embeddings", True)
+        if "enable_embeddings" in payload:
+            enable_embeddings = bool(payload.get("enable_embeddings"))
+        else:
+            enable_embeddings = embeddings_default_enabled(ctx.repo)
         enable_finbert = payload.get("enable_finbert", True)
         pipeline = ArticlePipeline(
             ctx.repo,

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from ..repositories import Repository
 from .article_extraction import DomainFetcher, needs_extraction
 from .article_ranking import RankInputs, compute_novelty_score, compute_rank_score
+from .feature_flags import is_enabled
 from .embeddings_service import DEFAULT_MODEL, embed_text, embed_texts_batch, make_embed_fn
 from .event_classification import classify_events
 from .market_reaction import compute_market_reactions
@@ -144,17 +145,19 @@ class ArticlePipeline:
 
         abnormal = reactions[0].abnormal_return_1d if reactions else None
         novelty = compute_novelty_score(max_similarity)
-        rank_score = compute_rank_score(
-            RankInputs(
-                sentiment_score=sentiment.score,
-                vader_compound=sentiment.vader_compound,
-                source_domain=row.get("source_domain"),
-                novelty_score=novelty,
-                abnormal_return_1d=abnormal,
-                event_confidence=event_confidence,
+        rank_score = None
+        if is_enabled("experimental_composite_rank", self.repo):
+            rank_score = compute_rank_score(
+                RankInputs(
+                    sentiment_score=sentiment.score,
+                    vader_compound=sentiment.vader_compound,
+                    source_domain=row.get("source_domain"),
+                    novelty_score=novelty,
+                    abnormal_return_1d=abnormal,
+                    event_confidence=event_confidence,
+                )
             )
-        )
-        self.repo.update_article_ranking(article_id, rank_score=rank_score, novelty_score=novelty)
+            self.repo.update_article_ranking(article_id, rank_score=rank_score, novelty_score=novelty)
         self.repo.set_article_pipeline_status(article_id, "complete")
 
         return {

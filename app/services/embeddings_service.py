@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# Embedding inference touchpoint — storage migration options: docs/SCALING.md
+
 import json
 import logging
 import math

@@ -380,6 +380,32 @@ def admin_status():
     return jsonify(get_repo().status_snapshot())
 
 
+@api_bp.route("/admin/config", methods=["GET"])
+def admin_get_config():
+    from ..services.feature_flags import FLAG_DEFAULTS, resolve_flags
+
+    repo = get_repo()
+    return jsonify({
+        "flags": resolve_flags(repo),
+        "defaults": FLAG_DEFAULTS,
+        "stored": repo.get_all_config(),
+    })
+
+
+@api_bp.route("/admin/config", methods=["POST"])
+def admin_set_config():
+    from ..services.feature_flags import KNOWN_FLAGS, resolve_flags
+
+    body = request.get_json(silent=True) or {}
+    repo = get_repo()
+    updated: list[str] = []
+    for key, value in body.items():
+        if key in KNOWN_FLAGS:
+            repo.set_config(key, bool(value))
+            updated.append(key)
+    return jsonify({"updated": updated, "flags": resolve_flags(repo)})
+
+
 @api_bp.route("/admin/universes", methods=["GET"])
 def admin_universes():
     return jsonify({"universes": list_universes()})
@@ -560,7 +586,13 @@ def retag_articles_admin():
     body = request.get_json(silent=True) or {}
     limit = request.args.get("limit", type=int) or body.get("limit") or 25
     offset = request.args.get("offset", type=int) or body.get("offset") or 0
-    enable_embeddings = _coerce_bool(body.get("enable_embeddings"), default=False)
+    from ..services.feature_flags import embeddings_default_enabled
+
+    repo = get_repo()
+    enable_embeddings = _coerce_bool(
+        body.get("enable_embeddings"),
+        default=embeddings_default_enabled(repo),
+    )
     enable_finbert = _coerce_bool(body.get("enable_finbert"), default=False)
     retag_all = _coerce_bool(request.args.get("retagAll"), default=True)
     if "retag_all" in body:
@@ -571,7 +603,7 @@ def retag_articles_admin():
 
     try:
         payload = ArticlePipeline(
-            get_repo(),
+            repo,
             enable_embeddings=enable_embeddings,
             enable_finbert=enable_finbert,
         ).retag_batch(
@@ -589,7 +621,14 @@ def retag_articles_admin():
 def enrich_articles_admin():
     body = request.get_json(silent=True) or {}
     limit = request.args.get("limit", type=int) or body.get("limit") or 25
-    enable_embeddings = _coerce_bool(body.get("enable_embeddings"), default=True)
+    from ..services.article_pipeline import ArticlePipeline
+    from ..services.feature_flags import embeddings_default_enabled
+
+    repo = get_repo()
+    enable_embeddings = _coerce_bool(
+        body.get("enable_embeddings"),
+        default=embeddings_default_enabled(repo),
+    )
     enable_finbert = _coerce_bool(body.get("enable_finbert"), default=True)
     force = _coerce_bool(request.args.get("force"), default=False) or _coerce_bool(body.get("force"))
     retag_only = (
@@ -598,9 +637,6 @@ def enrich_articles_admin():
         or _coerce_bool(body.get("retag_only"), default=False)
         or _coerce_bool(body.get("retagOnly"), default=False)
     )
-    from ..services.article_pipeline import ArticlePipeline
-
-    repo = get_repo()
     requeued = 0
     if force and not retag_only:
         requeued = repo.requeue_completed_articles(limit=max(int(limit) * 20, 500))

@@ -30,6 +30,41 @@ class Repository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
+    def get_config(self, key: str) -> Any | None:
+        row = self.conn.execute(
+            "SELECT value_json FROM app_config WHERE key = ?",
+            (key,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["value_json"])
+        except json.JSONDecodeError:
+            return None
+
+    def set_config(self, key: str, value: Any) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO app_config (key, value_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, json.dumps(value)),
+        )
+        self.conn.commit()
+
+    def get_all_config(self) -> dict[str, Any]:
+        rows = self.conn.execute("SELECT key, value_json FROM app_config").fetchall()
+        output: dict[str, Any] = {}
+        for row in rows:
+            try:
+                output[row["key"]] = json.loads(row["value_json"])
+            except json.JSONDecodeError:
+                continue
+        return output
+
     def counts(self) -> dict:
         tables = ["companies", "feeds", "articles", "fundamentals", "prices", "insider_transactions", "ingestion_jobs"]
         output = {}
@@ -484,18 +519,34 @@ class Repository:
                 output["altmanComponents"] = None
         return output
 
-    def fetch_price_near_date(self, ticker: str, target_date: str) -> float | None:
-        row = self.conn.execute(
-            """
-            SELECT close
+    def fetch_price_history(self, ticker: str, *, through_date: str | None = None) -> list[dict]:
+        """All price rows for a ticker up to through_date (inclusive)."""
+        sql = """
+            SELECT ticker, date, open, high, low, close, volume, source
             FROM prices
-            WHERE ticker = ? AND date <= ?
-            ORDER BY date DESC, CASE source WHEN 'stooq' THEN 0 ELSE 1 END
-            LIMIT 1
-            """,
-            (ticker.upper(), target_date[:10]),
-        ).fetchone()
-        return row["close"] if row else None
+            WHERE ticker = ?
+        """
+        params: list = [ticker.upper()]
+        if through_date:
+            sql += " AND date <= ?"
+            params.append(through_date[:10])
+        sql += " ORDER BY date ASC"
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_prices_by_period_ends(self, ticker: str, period_ends: list[str]) -> dict[str, float | None]:
+        """Bulk lookup: one price-history query, then in-memory period mapping."""
+        from .services.price_lookup import map_prices_by_period_end
+
+        normalized = sorted({period[:10] for period in period_ends if period})
+        if not normalized:
+            return {}
+        history = self.fetch_price_history(ticker, through_date=normalized[-1])
+        return map_prices_by_period_end(normalized, history)
+
+    def fetch_price_near_date(self, ticker: str, target_date: str) -> float | None:
+        mapped = self.fetch_prices_by_period_ends(ticker, [target_date])
+        return mapped.get(target_date[:10])
 
     def fetch_insider_summary_90d(self, tickers: list[str]) -> list[dict]:
         if not tickers:
@@ -1823,6 +1874,24 @@ class Repository:
         )
         self.conn.commit()
 
+    def _load_ui_prefs_dict(self) -> dict:
+        row = self.conn.execute(
+            "SELECT ui_prefs_json FROM user_preferences WHERE id = 1",
+        ).fetchone()
+        return self._parse_ui_prefs(row["ui_prefs_json"] if row else None)
+
+    def _save_ui_prefs_dict(self, ui_prefs: dict) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO user_preferences (id, theme, ui_prefs_json)
+            VALUES (1, 'dark', ?)
+            ON CONFLICT(id) DO UPDATE SET
+                ui_prefs_json = excluded.ui_prefs_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (json.dumps(ui_prefs),),
+        )
+
     def get_user_preferences(self) -> dict:
         row = self.conn.execute(
             "SELECT theme, ui_prefs_json FROM user_preferences WHERE id = 1",
@@ -1881,21 +1950,15 @@ class Repository:
                 "researchHeatLegend": current.get("researchHeatLegend", True),
             }
             merged.update(ui_updates)
-            import json
-
-            self.conn.execute(
-                """
-                INSERT INTO user_preferences (id, theme, ui_prefs_json)
-                VALUES (1, 'dark', ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    ui_prefs_json = excluded.ui_prefs_json,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (json.dumps(merged),),
-            )
+            self._save_ui_prefs_dict(merged)
         if portfolio is not None:
+            normalized = [
+                str(ticker).strip().upper()
+                for ticker in portfolio
+                if str(ticker).strip()
+            ]
             wl_id = self.upsert_watchlist("Portfolio", description="Default portfolio watchlist")
-            self.set_watchlist_tickers(wl_id, portfolio)
+            self.set_watchlist_tickers(wl_id, normalized)
         self.conn.commit()
         return self.get_user_preferences()
 
@@ -2269,6 +2332,7 @@ class Repository:
             )
         self.conn.commit()
 
+    # Embedding storage touchpoint — migration options in docs/SCALING.md (pgvector / FAISS).
     def upsert_article_embedding(
         self,
         article_id: int,

@@ -41,7 +41,11 @@ class ResearchService:
         wide_rows = fetch_resolved_wide_rows(self.repo, tickers, gte=None, resolved=resolved)
 
         all_annual = pivot_fundamentals_rows(
-            self.repo.fetch_fundamentals_rows(tickers, dimension="ARY")
+            collapse_narrow_fundamentals_rows(
+                self.repo.fetch_fundamentals_rows(tickers, dimension="ARY"),
+                annual=True,
+            ),
+            canonical_annual=True,
         )
         annual_by_ticker: dict[str, list[dict]] = {}
         for row in all_annual:
@@ -128,7 +132,10 @@ class ResearchService:
                 narrow_rows = collapse_narrow_fundamentals_rows(narrow_rows, annual=True)
             elif annual is False:
                 narrow_rows = collapse_narrow_fundamentals_rows(narrow_rows, annual=False)
-            return pivot_fundamentals_rows(narrow_rows)
+            return pivot_fundamentals_rows(
+                narrow_rows,
+                canonical_annual=True if annual is True else False,
+            )
 
         if isinstance(storage_dimension, str) and storage_dimension in SNAPSHOT_DIMENSIONS:
             all_rows = fetch_resolved_wide_rows(self.repo, [symbol], gte=gte, resolved=resolved)

@@ -1,4 +1,8 @@
-"""Canonical metric registry — metadata for engine, API, and UI heatmaps."""
+"""Canonical metric registry — metadata for engine, API, and UI heatmaps.
+
+Numeric score computation (Piotroski, Altman, Beneish, survivability) lives in
+scoring.py only; this module supplies score_type and heatmap_mode for display.
+"""
 
 from __future__ import annotations
 

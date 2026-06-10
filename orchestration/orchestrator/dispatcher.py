@@ -13,6 +13,11 @@ class AgentDispatcher:
         self._agents: dict[str, BaseAgent] = {}
 
     def resolve(self, event_type: str) -> BaseAgent | None:
+        if event_type == "analysis_completed":
+            from app.services.feature_flags import is_enabled
+
+            if not is_enabled("experimental_signal_ranking"):
+                return None
         agent_name = EVENT_AGENT_MAP.get(event_type)
         if not agent_name:
             return None

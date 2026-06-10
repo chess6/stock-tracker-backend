@@ -445,6 +445,15 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE user_preferences ADD COLUMN ui_prefs_json TEXT NOT NULL DEFAULT '{}'",
         )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_config (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     conn.commit()
 
 
