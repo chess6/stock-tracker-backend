@@ -53,6 +53,21 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
             snapshot_date=payload.get("snapshot_date"),
         )
 
+    def snapshot_narrative_intelligence(payload: dict) -> dict:
+        from ..services.narrative_intelligence import snapshot_narrative_intelligence as run_snapshot
+        from ..services.ticker_universes import get_universe_tickers
+
+        tickers = payload.get("tickers")
+        if not tickers and payload.get("universe"):
+            tickers = get_universe_tickers(str(payload["universe"]))
+        if not tickers:
+            tickers = ctx.default_tickers
+        return run_snapshot(
+            ctx.repo,
+            tickers,
+            snapshot_date=payload.get("snapshot_date"),
+        )
+
     def pipeline_refresh(payload: dict) -> dict:
         from ..services.pipeline_refresh import PipelineRefreshService
 
@@ -169,6 +184,7 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         "refresh_fundamentals": refresh_fundamentals,
         "refresh_company_scores": refresh_company_scores,
         "snapshot_composite_ranks": snapshot_composite_ranks,
+        "snapshot_narrative_intelligence": snapshot_narrative_intelligence,
         "pipeline_refresh": pipeline_refresh,
         "enrich_metadata": enrich_metadata,
         "ingest_default_feeds": ingest_default_feeds,

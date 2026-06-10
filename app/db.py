@@ -332,6 +332,20 @@ CREATE INDEX IF NOT EXISTS idx_rank_snapshots_composite_date
     ON company_rank_snapshots(composite, snapshot_date DESC);
 CREATE INDEX IF NOT EXISTS idx_rank_snapshots_ticker_composite
     ON company_rank_snapshots(ticker, composite, snapshot_date DESC);
+
+CREATE TABLE IF NOT EXISTS company_narrative_snapshots (
+    ticker TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    states_json TEXT,
+    divergence_score REAL,
+    divergence_signal TEXT,
+    emerging_situations_json TEXT,
+    computed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (ticker, snapshot_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_narrative_snapshots_ticker_date
+    ON company_narrative_snapshots(ticker, snapshot_date DESC);
 """
 
 
@@ -560,6 +574,27 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_rank_snapshots_ticker_composite
         ON company_rank_snapshots(ticker, composite, snapshot_date DESC)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS company_narrative_snapshots (
+            ticker TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            states_json TEXT,
+            divergence_score REAL,
+            divergence_signal TEXT,
+            emerging_situations_json TEXT,
+            computed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ticker, snapshot_date)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_narrative_snapshots_ticker_date
+        ON company_narrative_snapshots(ticker, snapshot_date DESC)
         """
     )
 

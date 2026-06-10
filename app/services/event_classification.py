@@ -3,6 +3,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+NARRATIVE_STATES = (
+    "bankruptcy_fear",
+    "liquidity_concern",
+    "turnaround_optimism",
+    "activist_pressure",
+    "cyclical_recovery",
+    "ai_optimism",
+    "restructuring",
+    "margin_stabilization",
+)
+
 EVENT_TYPES = (
     "earnings_beat",
     "earnings_miss",
@@ -101,6 +112,46 @@ _COMPILED_RULES = {
     for event_type, patterns in _EVENT_RULES.items()
 }
 
+_NARRATIVE_STATE_RULES: dict[str, list[tuple[str, float]]] = {
+    "bankruptcy_fear": [
+        (r"\b(bankruptcy|chapter\s+11|going\s+concern|insolvency|creditor\s+protection)\b", 0.9),
+        (r"\b(default\s+risk|debt\s+crisis|distressed\s+debt)\b", 0.8),
+    ],
+    "liquidity_concern": [
+        (r"\b(liquidity\s+crisis|cash\s+crunch|covenant\s+breach|working\s+capital\s+strain)\b", 0.85),
+        (r"\b(cash\s+burn|runway\s+concern|refinancing\s+risk)\b", 0.75),
+    ],
+    "turnaround_optimism": [
+        (r"\b(turnaround|recovery\s+plan|rebound|inflection\s+point|path\s+to\s+profitability)\b", 0.8),
+        (r"\b(improving\s+outlook|operational\s+turnaround)\b", 0.7),
+    ],
+    "activist_pressure": [
+        (r"\b(activist\s+investor|proxy\s+fight|board\s+shake[- ]?up|strategic\s+review)\b", 0.85),
+        (r"\b(elliott|pershing|valueact|icahn)\b", 0.75),
+    ],
+    "cyclical_recovery": [
+        (r"\b(cyclical\s+recovery|demand\s+rebound|inventory\s+destocking|trough)\b", 0.8),
+        (r"\b(sector\s+recovery|normalization\s+cycle)\b", 0.7),
+    ],
+    "ai_optimism": [
+        (r"\b(ai|artificial intelligence)\b.*\b(growth|demand|tailwind|adoption)\b", 0.75),
+        (r"\b(genai|generative\s+ai|machine\s+learning)\b", 0.65),
+    ],
+    "restructuring": [
+        (r"\b(restructur(ing|e)|cost[- ]cutting|portfolio\s+review|spin[- ]?off)\b", 0.75),
+        (r"\b(strategic\s+alternatives|asset\s+sale)\b", 0.7),
+    ],
+    "margin_stabilization": [
+        (r"\b(margin\s+stabiliz|margin\s+expansion|pricing\s+power|cost\s+discipline)\b", 0.8),
+        (r"\b(gross\s+margin\s+improv|operating\s+leverage)\b", 0.75),
+    ],
+}
+
+_COMPILED_NARRATIVE_RULES = {
+    state: [(re.compile(pattern, re.I), weight) for pattern, weight in patterns]
+    for state, patterns in _NARRATIVE_STATE_RULES.items()
+}
+
 # Anchor phrases for embedding-assisted classification (optional)
 EVENT_ANCHORS: dict[str, str] = {
     "earnings_beat": "Company reported quarterly earnings that beat analyst estimates and expectations.",
@@ -123,6 +174,13 @@ EVENT_ANCHORS: dict[str, str] = {
 @dataclass
 class EventClassification:
     event_type: str
+    confidence: float
+    method: str
+
+
+@dataclass
+class NarrativeStateClassification:
+    state: str
     confidence: float
     method: str
 
@@ -172,6 +230,22 @@ def classify_events_embedding(
         return results[:3]
     except Exception:
         return []
+
+
+def classify_narrative_states(text: str, *, min_confidence: float = 0.55) -> list[NarrativeStateClassification]:
+    if not text.strip():
+        return []
+    normalized = re.sub(r"\s+", " ", text.lower())
+    results: list[NarrativeStateClassification] = []
+    for state, patterns in _COMPILED_NARRATIVE_RULES.items():
+        best = 0.0
+        for regex, weight in patterns:
+            if regex.search(normalized):
+                best = max(best, weight)
+        if best >= min_confidence:
+            results.append(NarrativeStateClassification(state=state, confidence=best, method="rules"))
+    results.sort(key=lambda item: item.confidence, reverse=True)
+    return results
 
 
 def classify_events(text: str, *, embed_fn=None) -> list[EventClassification]:

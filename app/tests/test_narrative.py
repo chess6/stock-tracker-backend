@@ -97,6 +97,9 @@ def test_build_narrative_analysis_returns_expected_sections(app):
     assert isinstance(payload["eventTimeline"], list)
     assert isinstance(payload["topEvents"], list)
     assert len(payload["recentArticles"]) >= 1
+    assert isinstance(payload.get("narrativeStates"), list)
+    assert payload.get("narrativeDivergence") is not None
+    assert isinstance(payload.get("emergingSituations"), list)
 
 
 def test_build_narrative_analysis_handles_naive_published_at(app):

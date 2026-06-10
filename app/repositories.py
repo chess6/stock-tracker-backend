@@ -794,6 +794,77 @@ class Repository:
             history.append(item)
         return list(reversed(history))
 
+    def upsert_company_narrative_snapshots(self, records: Iterable[dict]) -> int:
+        import json
+
+        rows = []
+        for record in records:
+            rows.append(
+                (
+                    str(record["ticker"]).strip().upper(),
+                    record["snapshot_date"],
+                    json.dumps(record.get("states") or []),
+                    record.get("divergence_score"),
+                    record.get("divergence_signal"),
+                    json.dumps(record.get("emerging_situations") or []),
+                )
+            )
+        if not rows:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO company_narrative_snapshots (
+                ticker, snapshot_date, states_json,
+                divergence_score, divergence_signal, emerging_situations_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, snapshot_date) DO UPDATE SET
+                states_json=excluded.states_json,
+                divergence_score=excluded.divergence_score,
+                divergence_signal=excluded.divergence_signal,
+                emerging_situations_json=excluded.emerging_situations_json,
+                computed_at=CURRENT_TIMESTAMP
+            """,
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def fetch_latest_narrative_snapshots(self, tickers: list[str]) -> dict[str, dict]:
+        import json
+
+        if not tickers:
+            return {}
+        placeholders = ",".join("?" for _ in tickers)
+        rows = self.conn.execute(
+            f"""
+            SELECT ns.ticker, ns.snapshot_date, ns.states_json,
+                   ns.divergence_score, ns.divergence_signal, ns.emerging_situations_json
+            FROM company_narrative_snapshots ns
+            JOIN (
+                SELECT ticker, MAX(snapshot_date) AS snapshot_date
+                FROM company_narrative_snapshots
+                WHERE ticker IN ({placeholders})
+                GROUP BY ticker
+            ) latest ON latest.ticker = ns.ticker AND latest.snapshot_date = ns.snapshot_date
+            """,
+            [t.upper() for t in tickers],
+        ).fetchall()
+        output: dict[str, dict] = {}
+        for row in rows:
+            item = dict(row)
+            for key in ("states_json", "emerging_situations_json"):
+                raw = item.pop(key, None)
+                parsed_key = "states" if key == "states_json" else "emergingSituations"
+                if raw:
+                    try:
+                        item[parsed_key] = json.loads(raw)
+                    except (TypeError, ValueError):
+                        item[parsed_key] = []
+                else:
+                    item[parsed_key] = []
+            output[row["ticker"]] = item
+        return output
+
     def fetch_latest_company_scores(
         self,
         tickers: list[str],

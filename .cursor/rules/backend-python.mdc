@@ -33,8 +33,20 @@ return jsonify({"error": str(exc)}), 500
 ## Queries & performance
 
 - No N+1 patterns: batch reads in repositories; never query per ticker/row inside route handlers or loops.
-- Profile with `EXPLAIN QUERY PLAN` before adding indexes or cache tables.
+- **Run `EXPLAIN QUERY PLAN` before AND after** any new `SELECT` on `companies`, `articles`, or `metrics`, any new join, any new `ORDER BY`/`GROUP BY`, or any filter on an un-indexed column. Record the plan in the Phase 4 outcome summary.
+- Benchmark wall-clock timing with representative row counts when adding queries to hot paths (screener load, article feed, scoring pipeline).
 - Do not add materialized-cache tables or snapshot stores without measured need — SQLite-first simplicity.
+
+## Prohibited patterns
+
+| Pattern | Reason |
+|---------|--------|
+| Per-row DB call in a loop | N+1; use batch repository reads |
+| Hardcoded scoring thresholds in route handlers | Breaks canonical scoring architecture |
+| Schema field names invented without inspection | Hallucinated fields cause silent data corruption |
+| `print()` in production paths | Use structured logging (`logging.info/warning/error`) |
+| New ingestion source without idempotency guard | Causes duplicate DB writes on rerun |
+| New SQLite table without migration + index plan | Schema drift; unindexed table scans |
 
 ## Metrics & scoring
 

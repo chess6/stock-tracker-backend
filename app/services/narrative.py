@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..repositories import Repository
+from .narrative_intelligence import build_narrative_intelligence
 
 logger = logging.getLogger("stock_tracker.narrative")
 
@@ -320,6 +321,7 @@ def build_narrative_analysis(
 
     daily_sentiment = _build_daily_sentiment(articles)
     daily_with_ma = _rolling_average(daily_sentiment, 30)
+    intelligence = build_narrative_intelligence(repo, symbol, articles)
 
     payload: dict[str, Any] = {
         "ticker": symbol,
@@ -352,6 +354,10 @@ def build_narrative_analysis(
             for article in articles[:25]
         ],
         "articleCount": len(articles),
+        "narrativeStates": intelligence.get("narrativeStates", []),
+        "narrativeDivergence": intelligence.get("narrativeDivergence"),
+        "emergingSituations": intelligence.get("emergingSituations", []),
+        "newsBursts": intelligence.get("newsBursts", []),
     }
 
     if use_cache:
