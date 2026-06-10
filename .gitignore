@@ -6,6 +6,8 @@
 backend.out
 .env
 data/
+!app/data/
+!app/data/sp500_constituents.json
 logs/
 __pycache__/
 .pytest_cache/

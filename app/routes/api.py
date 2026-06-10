@@ -11,6 +11,7 @@ from ..services.fundamentals import FundamentalsService
 from ..services.insiders import InsidersService
 from ..services.news import NewsService
 from ..services.prices import PricesService
+from ..services.ticker_universes import chunk_tickers, get_universe, get_universe_tickers, list_universes
 
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
@@ -60,6 +61,23 @@ def get_prices_service() -> PricesService:
 
 def get_insiders_service() -> InsidersService:
     return InsidersService(get_repo(), get_sec_client())
+
+
+def _resolve_admin_tickers(*, body: dict | None = None) -> tuple[list[str] | None, str | None]:
+    """Resolve tickers from ?universe= or explicit list. Returns (tickers, error)."""
+    universe = request.args.get("universe") or (body or {}).get("universe")
+    if universe:
+        tickers = get_universe_tickers(universe)
+        if not tickers:
+            return None, f"Unknown universe: {universe}"
+        return tickers, None
+
+    tickers = (body or {}).get("tickers") if body else None
+    if not tickers:
+        tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    if not tickers:
+        return None, None
+    return tickers, None
 
 
 @api_bp.route("/search", methods=["GET"])
@@ -362,6 +380,50 @@ def admin_status():
     return jsonify(get_repo().status_snapshot())
 
 
+@api_bp.route("/admin/universes", methods=["GET"])
+def admin_universes():
+    return jsonify({"universes": list_universes()})
+
+
+@api_bp.route("/admin/universes/<universe_id>", methods=["GET"])
+def admin_universe_detail(universe_id: str):
+    payload = get_universe(universe_id)
+    if not payload:
+        return jsonify({"error": f"Unknown universe: {universe_id}"}), 404
+    return jsonify(payload)
+
+
+@api_bp.route("/admin/enqueue-universe-insiders", methods=["POST"])
+def enqueue_universe_insiders():
+    body = request.get_json(silent=True) or {}
+    universe_id = request.args.get("universe") or body.get("universe")
+    if not universe_id:
+        return jsonify({"error": "universe is required (e.g. sp500)"}), 400
+    tickers = get_universe_tickers(universe_id)
+    if not tickers:
+        return jsonify({"error": f"Unknown universe: {universe_id}"}), 400
+
+    chunk_size = request.args.get("chunkSize", type=int) or body.get("chunkSize") or 75
+    chunks = chunk_tickers(tickers, chunk_size=max(int(chunk_size), 1))
+    repo = get_repo()
+    jobs = []
+    for index, chunk in enumerate(chunks):
+        job_id = repo.enqueue_job(
+            "refresh_insiders",
+            {"tickers": chunk, "universe": universe_id, "chunk": index + 1, "chunks": len(chunks)},
+            priority=35,
+        )
+        jobs.append({"jobId": job_id, "chunk": index + 1, "tickers": len(chunk)})
+    return jsonify(
+        {
+            "universe": universe_id,
+            "totalTickers": len(tickers),
+            "chunks": len(chunks),
+            "jobs": jobs,
+        }
+    )
+
+
 @api_bp.route("/admin/job-runs", methods=["GET"])
 def admin_job_runs():
     limit = min(max(int(request.args.get("limit", 25)), 1), 100)
@@ -399,12 +461,17 @@ def enrich_metadata():
 
 @api_bp.route("/admin/refresh-fundamentals", methods=["POST"])
 def refresh_fundamentals():
-    tickers = request.json.get("tickers") if request.is_json else None
+    body = request.get_json(silent=True) or {}
+    tickers = body.get("tickers") if body else None
     if not tickers:
         tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
     if not tickers:
         return jsonify({"error": "No tickers provided"}), 400
-    payload = get_fundamentals_service().refresh_fundamentals(tickers)
+    try:
+        payload = get_fundamentals_service().refresh_fundamentals(tickers)
+    except Exception as exc:
+        current_app.logger.exception("Fundamentals refresh failed")
+        return jsonify({"error": str(exc)}), 500
     return jsonify(payload)
 
 
@@ -706,13 +773,13 @@ def refresh_prices():
 
 @api_bp.route("/admin/refresh-insiders", methods=["POST"])
 def refresh_insiders():
-    tickers = request.json.get("tickers") if request.is_json else None
-    if not tickers:
-        tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
-    if not tickers:
-        return jsonify({"error": "No tickers provided"}), 400
-    max_filings = request.args.get("maxFilingsPerCompany", type=int)
     body = request.get_json(silent=True) or {}
+    tickers, universe_error = _resolve_admin_tickers(body=body)
+    if universe_error:
+        return jsonify({"error": universe_error}), 400
+    if not tickers:
+        return jsonify({"error": "No tickers provided (or pass ?universe=sp500)"}), 400
+    max_filings = request.args.get("maxFilingsPerCompany", type=int)
     if max_filings is None:
         raw_max = body.get("max_filings_per_company") or body.get("maxFilingsPerCompany")
         if raw_max is not None:

@@ -10,6 +10,7 @@ from ..services.fundamentals import FundamentalsService
 from ..services.insiders import InsidersService
 from ..services.news import NewsService
 from ..services.prices import PricesService
+from ..services.ticker_universes import get_universe_tickers
 
 logger = logging.getLogger("stock_tracker.pipeline.extract_articles")
 
@@ -70,7 +71,11 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         return ctx.prices.refresh_prices(tickers)
 
     def refresh_insiders(payload: dict) -> dict:
-        tickers = payload.get("tickers") or ctx.default_tickers
+        tickers = payload.get("tickers")
+        if not tickers and payload.get("universe"):
+            tickers = get_universe_tickers(str(payload["universe"]))
+        if not tickers:
+            tickers = ctx.default_tickers
         max_filings = payload.get("max_filings_per_company") or payload.get("maxFilingsPerCompany")
         if max_filings is not None and int(max_filings) > 0:
             return ctx.insiders.refresh_insiders(tickers, max_filings_per_company=int(max_filings))
