@@ -173,3 +173,38 @@ def test_pipeline_process_article_without_network(app, monkeypatch):
         assert row["pipeline_status"] == "complete"
         assert row["body_text"]
         assert row["vader_compound"] is not None
+
+
+def test_pipeline_reuses_embedding_when_content_hash_unchanged(app, monkeypatch):
+    with app.app_context():
+        repo = Repository(get_db())
+        article_id = _insert_article(
+            repo,
+            body_text="Stable earnings body text for embedding reuse.",
+        )
+        repo.conn.execute(
+            "UPDATE articles SET content_hash = ? WHERE id = ?",
+            ("stable-hash", article_id),
+        )
+        repo.conn.commit()
+        repo.upsert_article_embedding(
+            article_id,
+            model="all-MiniLM-L6-v2",
+            vector=[0.1, 0.2, 0.3],
+            content_hash="stable-hash",
+        )
+
+        embed_calls: list[str] = []
+
+        def _fail_embed(*args, **kwargs):
+            embed_calls.append("called")
+            raise AssertionError("embed_text should not run when content_hash is unchanged")
+
+        monkeypatch.setattr("app.services.article_pipeline.embed_text", _fail_embed)
+        from app.services.article_pipeline import ArticlePipeline
+
+        pipeline = ArticlePipeline(repo, enable_embeddings=True, enable_finbert=False)
+        result = pipeline.process_article(article_id)
+        assert result["status"] == "complete"
+        assert embed_calls == []
+        assert repo.get_article_embedding_hash(article_id, model="all-MiniLM-L6-v2") == "stable-hash"

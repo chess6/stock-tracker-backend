@@ -286,6 +286,7 @@ def _observation_record(company_id: int, metric: str, config: dict, concept: str
         "form": observation.get("form"),
         "accession": observation.get("accn"),
         "source": "sec_companyfacts",
+        "source_updated_at": observation.get("filed"),
         "taxonomy": config["taxonomy"],
         "xbrl_concept": concept,
     }

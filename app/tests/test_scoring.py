@@ -397,6 +397,12 @@ def test_refresh_fundamentals_persists_company_scores(app):
             self.scores.extend(records)
             return len(records)
 
+        def should_skip_score_recompute(self, company_id, period_ends, scoring_version, *, dimension="ARY"):
+            return False
+
+        def fetch_fundamentals_overwrite_state(self, company_id):
+            return {}
+
         def delete_fundamentals_snapshots(self, company_id, dimensions):
             return None
 
@@ -716,6 +722,12 @@ def test_refresh_company_scores_batch(app):
         result = service.refresh_company_scores_batch(["GOOD"])
         assert "GOOD" in result["tickers"]
         assert result["periodsWritten"] >= 1
+        assert result["recomputed"] >= 1
+
+        second = service.refresh_company_scores_batch(["GOOD"])
+        assert second["skipped_unchanged"] == 1
+        assert second["recomputed"] == 0
+        assert second["periodsWritten"] == 0
 
         scores = repo.fetch_company_scores(company["id"], dimension="ARY")
         assert len(scores) >= 1
@@ -788,7 +800,7 @@ def test_research_routes_return_screener_and_ticker_payload(app, client):
             def fetch_submissions(self, cik):
                 return {"filings": {"recent": {}}}
 
-        FundamentalsService(repo, StubSec())._refresh_company_scores(company["id"], "AAPL")
+        FundamentalsService(repo, StubSec())._refresh_company_scores(company["id"], "AAPL")[0]
 
     screener = client.get("/api/research/screener?tickers=AAPL&dimension=MRY")
     assert screener.status_code == 200

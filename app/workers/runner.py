@@ -9,6 +9,31 @@ from .handlers import JobContext, build_handlers
 
 logger = logging.getLogger("stock_tracker.pipeline.worker")
 
+_SUMMARY_KEYS = (
+    "processed",
+    "recomputed",
+    "skipped_unchanged",
+    "skipped",
+    "upserted",
+    "written",
+    "totalTickers",
+    "chunks",
+)
+
+
+def _format_job_summary(job_type: str, result: dict | None, elapsed: float) -> str:
+    parts = [f"job_complete type={job_type} elapsed={elapsed:.2f}s"]
+    payload = result or {}
+    for key in _SUMMARY_KEYS:
+        if key in payload:
+            parts.append(f"{key}={payload[key]}")
+    tickers = payload.get("tickers")
+    if isinstance(tickers, list):
+        parts.append(f"tickers={len(tickers)}")
+    elif isinstance(tickers, int):
+        parts.append(f"tickers={tickers}")
+    return " ".join(parts)
+
 
 class WorkerRunner:
     def __init__(self, ctx: JobContext, poll_interval_seconds: int = 5) -> None:
@@ -32,8 +57,13 @@ class WorkerRunner:
             result = handler(job["payload"])
             elapsed = time.monotonic() - t0
             self.ctx.repo.complete_job(job["id"], status="done")
-            logger.info("Job done id=%s type=%s elapsed=%.1fs result_keys=%s",
-                       job["id"], job["job_type"], elapsed, list((result or {}).keys()))
+            logger.info(_format_job_summary(job["job_type"], result, elapsed))
+            logger.debug(
+                "Job done id=%s type=%s result_keys=%s",
+                job["id"],
+                job["job_type"],
+                list((result or {}).keys()),
+            )
         except Exception as exc:
             elapsed = time.monotonic() - t0
             logger.exception("Job failed id=%s type=%s elapsed=%.1fs", job["id"], job["job_type"], elapsed)

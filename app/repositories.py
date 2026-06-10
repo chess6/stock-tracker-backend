@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Iterable
+from typing import Any, Iterable
 
 try:
     from rapidfuzz import fuzz  # type: ignore
@@ -126,6 +126,180 @@ class Repository:
             "feeds": [dict(row) for row in feed_rows],
             "recentJobRuns": recent_jobs,
         }
+
+    def pipeline_status_snapshot(self) -> dict:
+        from .services.freshness import (
+            CURRENT_SCORING_VERSION,
+            DEFAULT_STALE_FUNDAMENTALS_DAYS,
+            DEFAULT_STALE_PRICES_DAYS,
+        )
+
+        articles = self.get_pipeline_status_counts()
+        freshness = {
+            "fundamentalsUpdatedAt": self.conn.execute(
+                "SELECT MAX(updated_at) FROM fundamentals"
+            ).fetchone()[0],
+            "fundamentalsSourceUpdatedAt": self.conn.execute(
+                "SELECT MAX(source_updated_at) FROM fundamentals"
+            ).fetchone()[0],
+            "pricesFetchedAt": self._max_prices_fetched_at(),
+            "scoresComputedAt": self.conn.execute(
+                "SELECT MAX(computed_at) FROM company_scores"
+            ).fetchone()[0],
+            "embeddingsUpdatedAt": self.conn.execute(
+                "SELECT MAX(updated_at) FROM article_embedding_vectors"
+            ).fetchone()[0],
+            "articlesFetchedAt": self.conn.execute(
+                "SELECT MAX(fetched_at) FROM articles"
+            ).fetchone()[0],
+            "articlesMaxEnrichmentVersion": self.conn.execute(
+                "SELECT MAX(COALESCE(enrichment_version, 0)) FROM articles"
+            ).fetchone()[0],
+        }
+        stale = {
+            "fundamentalsTickers": len(
+                self.fetch_stale_fundamentals_tickers(DEFAULT_STALE_FUNDAMENTALS_DAYS)
+            ),
+            "pricesTickers": len(self.fetch_stale_prices_tickers(DEFAULT_STALE_PRICES_DAYS)),
+            "scoresNeedingRecompute": len(
+                self.fetch_scores_needing_recompute(CURRENT_SCORING_VERSION)
+            ),
+            "staleAfterDays": {
+                "fundamentals": DEFAULT_STALE_FUNDAMENTALS_DAYS,
+                "prices": DEFAULT_STALE_PRICES_DAYS,
+            },
+        }
+        recent_jobs = self.list_job_runs(limit=5)
+        return {
+            "articles": articles,
+            "freshness": freshness,
+            "stale": stale,
+            "versions": {
+                "scoring": CURRENT_SCORING_VERSION,
+            },
+            "lastJobRun": recent_jobs[0] if recent_jobs else None,
+            "recentJobRuns": recent_jobs,
+        }
+
+    def _max_prices_fetched_at(self) -> str | None:
+        row = self.conn.execute(
+            """
+            SELECT MAX(COALESCE(fetched_at, created_at)) AS latest
+            FROM prices
+            """
+        ).fetchone()
+        return row["latest"] if row else None
+
+    def _stale_cutoff_iso(self, stale_after_days: int) -> str:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=stale_after_days)
+        return cutoff.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def fetch_stale_fundamentals_tickers(self, stale_after_days: int) -> list[str]:
+        cutoff = self._stale_cutoff_iso(stale_after_days)
+        rows = self.conn.execute(
+            """
+            SELECT c.ticker
+            FROM companies c
+            JOIN fundamentals f ON f.company_id = c.id
+            GROUP BY c.id, c.ticker
+            HAVING MAX(f.updated_at) < ?
+            ORDER BY c.ticker
+            """,
+            (cutoff,),
+        ).fetchall()
+        return [row["ticker"] for row in rows]
+
+    def fetch_stale_prices_tickers(self, stale_after_days: int) -> list[str]:
+        cutoff = self._stale_cutoff_iso(stale_after_days)
+        rows = self.conn.execute(
+            """
+            SELECT ticker
+            FROM prices
+            GROUP BY ticker
+            HAVING MAX(COALESCE(fetched_at, created_at)) < ?
+            ORDER BY ticker
+            """,
+            (cutoff,),
+        ).fetchall()
+        return [row["ticker"] for row in rows]
+
+    def fetch_scores_needing_recompute(self, scoring_version: int) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT c.ticker
+            FROM companies c
+            WHERE EXISTS (
+                SELECT 1 FROM fundamentals f WHERE f.company_id = c.id
+            )
+            AND (
+                NOT EXISTS (
+                    SELECT 1 FROM company_scores cs WHERE cs.company_id = c.id
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM company_scores cs
+                    WHERE cs.company_id = c.id
+                      AND COALESCE(cs.scoring_version, 1) < ?
+                )
+            )
+            ORDER BY c.ticker
+            """,
+            (scoring_version,),
+        ).fetchall()
+        return [row["ticker"] for row in rows]
+
+    def get_article_embedding_hash(self, article_id: int, *, model: str) -> str | None:
+        row = self.conn.execute(
+            """
+            SELECT content_hash
+            FROM article_embedding_vectors
+            WHERE article_id = ? AND model = ?
+            """,
+            (article_id, model),
+        ).fetchone()
+        return row["content_hash"] if row else None
+
+    def should_skip_score_recompute(
+        self,
+        company_id: int,
+        period_ends: list[str],
+        scoring_version: int,
+        *,
+        dimension: str = "ARY",
+    ) -> bool:
+        unique_periods = list(dict.fromkeys(end for end in period_ends if end))
+        if not unique_periods:
+            return True
+
+        latest_fundamentals_at = self.conn.execute(
+            """
+            SELECT MAX(updated_at) AS latest
+            FROM fundamentals
+            WHERE company_id = ? AND dimension = ?
+            """,
+            (company_id, dimension),
+        ).fetchone()["latest"]
+        if not latest_fundamentals_at:
+            return False
+
+        placeholders = ",".join("?" for _ in unique_periods)
+        rows = self.conn.execute(
+            f"""
+            SELECT period_end, COALESCE(scoring_version, 1) AS scoring_version, computed_at
+            FROM company_scores
+            WHERE company_id = ? AND dimension = ? AND period_end IN ({placeholders})
+            """,
+            [company_id, dimension, *unique_periods],
+        ).fetchall()
+        if len(rows) != len(unique_periods):
+            return False
+
+        for row in rows:
+            if row["scoring_version"] < scoring_version:
+                return False
+            if row["computed_at"] < latest_fundamentals_at:
+                return False
+        return True
 
     def upsert_companies(self, companies: Iterable[dict]) -> int:
         rows = [
@@ -315,6 +489,72 @@ class Repository:
         rows = self.conn.execute(sql, params).fetchall()
         return [row["ticker"] for row in rows]
 
+    def fetch_all_tradable_tickers(self, limit: int | None = None) -> list[str]:
+        sql = """
+            SELECT ticker
+            FROM companies
+            WHERE cik IS NOT NULL AND TRIM(cik) != ''
+            ORDER BY ticker
+        """
+        params: list = []
+        if limit is not None and limit > 0:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [row["ticker"] for row in rows]
+
+    def fetch_tickers_without_fundamentals(self, candidates: list[str] | None = None) -> list[str]:
+        params: list = ["ARY"]
+        candidate_clause = ""
+        if candidates:
+            upper = [item.upper() for item in candidates if item]
+            if not upper:
+                return []
+            placeholders = ",".join("?" for _ in upper)
+            candidate_clause = f"AND c.ticker IN ({placeholders})"
+            params.extend(upper)
+        rows = self.conn.execute(
+            f"""
+            SELECT c.ticker
+            FROM companies c
+            WHERE c.cik IS NOT NULL AND TRIM(c.cik) != ''
+              {candidate_clause}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM fundamentals f
+                  WHERE f.company_id = c.id AND f.dimension = ?
+              )
+            ORDER BY c.ticker
+            """,
+            params,
+        ).fetchall()
+        return [row["ticker"] for row in rows]
+
+    def fetch_tickers_without_prices(self, candidates: list[str] | None = None) -> list[str]:
+        candidate_clause = ""
+        params: list = []
+        if candidates:
+            upper = [item.upper() for item in candidates if item]
+            if not upper:
+                return []
+            placeholders = ",".join("?" for _ in upper)
+            candidate_clause = f"AND c.ticker IN ({placeholders})"
+            params.extend(upper)
+        rows = self.conn.execute(
+            f"""
+            SELECT c.ticker
+            FROM companies c
+            WHERE c.cik IS NOT NULL AND TRIM(c.cik) != ''
+              {candidate_clause}
+              AND NOT EXISTS (
+                  SELECT 1 FROM prices p WHERE p.ticker = c.ticker
+              )
+            ORDER BY c.ticker
+            """,
+            params,
+        ).fetchall()
+        return [row["ticker"] for row in rows]
+
     def list_companies_for_matching(self) -> list[dict]:
         rows = self.conn.execute("SELECT id, ticker, name FROM companies").fetchall()
         return [dict(row) for row in rows]
@@ -337,6 +577,7 @@ class Repository:
                 record["source"],
                 record.get("taxonomy"),
                 record.get("xbrl_concept"),
+                record.get("source_updated_at") or record.get("filing_date"),
             )
             for record in records
         ]
@@ -346,8 +587,9 @@ class Repository:
             """
             INSERT INTO fundamentals (
                 company_id, metric, value, unit, period_end, period_type, dimension,
-                fiscal_year, fiscal_quarter, filing_date, form, accession, source, taxonomy, xbrl_concept
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                fiscal_year, fiscal_quarter, filing_date, form, accession, source, taxonomy,
+                xbrl_concept, source_updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(company_id, metric, period_end, dimension, filing_date, xbrl_concept) DO UPDATE SET
                 value=excluded.value,
                 unit=excluded.unit,
@@ -358,12 +600,33 @@ class Repository:
                 accession=excluded.accession,
                 source=excluded.source,
                 taxonomy=excluded.taxonomy,
+                source_updated_at=COALESCE(excluded.source_updated_at, fundamentals.source_updated_at),
                 updated_at=CURRENT_TIMESTAMP
             """,
             rows,
         )
         self.conn.commit()
         return len(rows)
+
+    def fetch_fundamentals_overwrite_state(self, company_id: int) -> dict[tuple, str | None]:
+        rows = self.conn.execute(
+            """
+            SELECT metric, period_end, dimension, filing_date, xbrl_concept, source_updated_at
+            FROM fundamentals
+            WHERE company_id = ?
+            """,
+            (company_id,),
+        ).fetchall()
+        return {
+            (
+                row["metric"],
+                row["period_end"],
+                row["dimension"],
+                row["filing_date"],
+                row["xbrl_concept"],
+            ): row["source_updated_at"] or row["filing_date"]
+            for row in rows
+        }
 
     def fetch_fundamentals_rows(self, tickers: list[str], gte: str | None = None, dimension: str | None = None) -> list[dict]:
         if not tickers:
@@ -401,6 +664,8 @@ class Repository:
         return [dict(row) for row in rows]
 
     def upsert_company_scores(self, company_id: int, records: Iterable[dict]) -> int:
+        from .services.freshness import CURRENT_SCORING_VERSION
+
         rows = [
             (
                 company_id,
@@ -412,6 +677,7 @@ class Repository:
                 record.get("survivability"),
                 record.get("piotroski_components"),
                 record.get("altman_components"),
+                record.get("scoring_version", CURRENT_SCORING_VERSION),
             )
             for record in records
         ]
@@ -422,8 +688,8 @@ class Repository:
             INSERT INTO company_scores (
                 company_id, period_end, dimension,
                 piotroski_f, altman_z, beneish_m, survivability,
-                piotroski_components, altman_components, computed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                piotroski_components, altman_components, computed_at, scoring_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
             ON CONFLICT(company_id, period_end, dimension) DO UPDATE SET
                 piotroski_f=excluded.piotroski_f,
                 altman_z=excluded.altman_z,
@@ -431,7 +697,8 @@ class Repository:
                 survivability=excluded.survivability,
                 piotroski_components=excluded.piotroski_components,
                 altman_components=excluded.altman_components,
-                computed_at=CURRENT_TIMESTAMP
+                computed_at=CURRENT_TIMESTAMP,
+                scoring_version=excluded.scoring_version
             """,
             rows,
         )
@@ -1574,6 +1841,7 @@ class Repository:
         self.conn.commit()
 
     def upsert_prices(self, ticker: str, rows: Iterable[dict], source: str) -> int:
+        fetched_at = utc_now_iso()
         payload = [
             (
                 ticker.upper(),
@@ -1584,6 +1852,7 @@ class Repository:
                 row.get("close"),
                 row.get("volume"),
                 row.get("source", source),
+                fetched_at,
             )
             for row in rows
             if row.get("date") and row.get("close") is not None
@@ -1592,14 +1861,15 @@ class Repository:
             return 0
         self.conn.executemany(
             """
-            INSERT INTO prices (ticker, date, open, high, low, close, volume, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO prices (ticker, date, open, high, low, close, volume, source, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ticker, date, source) DO UPDATE SET
                 open=excluded.open,
                 high=excluded.high,
                 low=excluded.low,
                 close=excluded.close,
-                volume=excluded.volume
+                volume=excluded.volume,
+                fetched_at=excluded.fetched_at
             """,
             payload,
         )
@@ -2343,17 +2613,21 @@ class Repository:
     ) -> None:
         from .services.embeddings_service import vector_to_json
 
+        now = utc_now_iso()
         self.conn.execute(
             """
-            INSERT INTO article_embedding_vectors (article_id, model, dimensions, vector_json, content_hash)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO article_embedding_vectors (
+                article_id, model, dimensions, vector_json, content_hash, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(article_id, model) DO UPDATE SET
                 dimensions = excluded.dimensions,
                 vector_json = excluded.vector_json,
                 content_hash = excluded.content_hash,
+                updated_at = excluded.updated_at,
                 created_at = CURRENT_TIMESTAMP
             """,
-            (article_id, model, len(vector), vector_to_json(vector), content_hash),
+            (article_id, model, len(vector), vector_to_json(vector), content_hash, now),
         )
         self.upsert_embedding_metadata(
             article_id,

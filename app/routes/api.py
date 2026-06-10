@@ -80,6 +80,14 @@ def _resolve_admin_tickers(*, body: dict | None = None) -> tuple[list[str] | Non
     return tickers, None
 
 
+def _coerce_bool(value, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).lower() in {"1", "true", "yes"}
+
+
 @api_bp.route("/search", methods=["GET"])
 def search_ticker():
     query = request.args.get("q", "").strip()
@@ -380,6 +388,11 @@ def admin_status():
     return jsonify(get_repo().status_snapshot())
 
 
+@api_bp.route("/admin/pipeline-status", methods=["GET"])
+def admin_pipeline_status():
+    return jsonify(get_repo().pipeline_status_snapshot())
+
+
 @api_bp.route("/admin/config", methods=["GET"])
 def admin_get_config():
     from ..services.feature_flags import FLAG_DEFAULTS, resolve_flags
@@ -485,19 +498,87 @@ def enrich_metadata():
     return jsonify(payload)
 
 
+@api_bp.route("/admin/pipeline-refresh", methods=["POST"])
+def admin_pipeline_refresh():
+    from ..services.pipeline_refresh import PipelineRefreshService
+
+    body = request.get_json(silent=True) or {}
+    mode = request.args.get("mode") or body.get("mode") or "force_refresh"
+    tickers, universe_error = _resolve_admin_tickers(body=body)
+    if universe_error:
+        return jsonify({"error": universe_error}), 400
+    article_limit = request.args.get("limit", type=int) or body.get("limit") or 50
+    force_refresh = _coerce_bool(request.args.get("forceRefresh"), default=False) or _coerce_bool(
+        body.get("forceRefresh"), default=_coerce_bool(body.get("force_refresh"), default=False)
+    )
+    dry_run = _coerce_bool(request.args.get("dryRun"), default=False) or _coerce_bool(
+        body.get("dryRun"), default=_coerce_bool(body.get("dry_run"), default=False)
+    )
+    from ..services.pipeline_modes import normalize_mode
+
+    if normalize_mode(mode) in {"force_refresh", "full_rebuild"}:
+        force_refresh = True
+    try:
+        payload = PipelineRefreshService(
+            get_repo(),
+            get_fundamentals_service(),
+            get_prices_service(),
+            get_news_service(),
+        ).run(
+            mode,
+            tickers=tickers,
+            article_limit=int(article_limit),
+            force_refresh=force_refresh,
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        current_app.logger.exception("Pipeline refresh failed")
+        return jsonify({"error": str(exc), "mode": mode}), 500
+    if payload.get("error"):
+        return jsonify(payload), 400
+    return jsonify(payload)
+
+
 @api_bp.route("/admin/refresh-fundamentals", methods=["POST"])
 def refresh_fundamentals():
+    from ..services.pipeline_modes import normalize_mode, resolve_fundamentals_tickers
+
     body = request.get_json(silent=True) or {}
-    tickers = body.get("tickers") if body else None
-    if not tickers:
-        tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
-    if not tickers:
+    mode = request.args.get("mode") or body.get("mode") or "force_refresh"
+    tickers, universe_error = _resolve_admin_tickers(body=body)
+    if universe_error:
+        return jsonify({"error": universe_error}), 400
+    force_refresh = _coerce_bool(request.args.get("forceRefresh"), default=False) or _coerce_bool(
+        body.get("forceRefresh"), default=_coerce_bool(body.get("force_refresh"), default=False)
+    )
+    dry_run = _coerce_bool(request.args.get("dryRun"), default=False) or _coerce_bool(
+        body.get("dryRun"), default=_coerce_bool(body.get("dry_run"), default=False)
+    )
+    if normalize_mode(mode) in {"force_refresh", "full_rebuild"}:
+        force_refresh = True
+    tickers = resolve_fundamentals_tickers(get_repo(), mode, tickers)
+    if normalize_mode(mode) == "force_refresh" and not tickers:
         return jsonify({"error": "No tickers provided"}), 400
+    if not tickers:
+        return jsonify(
+            {
+                "mode": mode,
+                "tickers": [],
+                "recordsWritten": 0,
+                "skipped": [],
+                "errors": [],
+            }
+        )
     try:
-        payload = get_fundamentals_service().refresh_fundamentals(tickers)
+        payload = get_fundamentals_service().refresh_fundamentals(
+            tickers,
+            force_refresh=force_refresh,
+            dry_run=dry_run,
+        )
     except Exception as exc:
         current_app.logger.exception("Fundamentals refresh failed")
         return jsonify({"error": str(exc)}), 500
+    payload["mode"] = mode
     return jsonify(payload)
 
 
@@ -561,14 +642,6 @@ def ingest_default_feeds():
     if pending > 0:
         repo.enqueue_job("enrich_articles", {"limit": 50}, priority=55)
     return jsonify(payload)
-
-
-def _coerce_bool(value, *, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    return str(value).lower() in {"1", "true", "yes"}
 
 
 @api_bp.route("/admin/enrich-articles/status", methods=["GET"])
@@ -787,13 +860,19 @@ def backfill_market_reactions_admin():
 
 @api_bp.route("/admin/refresh-prices", methods=["POST"])
 def refresh_prices():
-    tickers = request.json.get("tickers") if request.is_json else None
-    if not tickers:
-        tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
-    if not tickers:
-        return jsonify({"error": "No tickers provided"}), 400
-    days = request.args.get("days", type=int)
+    from ..services.pipeline_modes import normalize_mode, resolve_prices_tickers
+
     body = request.get_json(silent=True) or {}
+    mode = request.args.get("mode") or body.get("mode") or "force_refresh"
+    tickers, universe_error = _resolve_admin_tickers(body=body)
+    if universe_error:
+        return jsonify({"error": universe_error}), 400
+    if normalize_mode(mode) == "force_refresh" and not tickers:
+        return jsonify({"error": "No tickers provided"}), 400
+    tickers = resolve_prices_tickers(get_repo(), mode, tickers)
+    if not tickers:
+        return jsonify({"mode": mode, "tickers": [], "recordsWritten": 0})
+    days = request.args.get("days", type=int)
     if days is None and body.get("days") is not None:
         days = int(body["days"])
     try:
@@ -804,6 +883,7 @@ def refresh_prices():
     except Exception as exc:
         current_app.logger.exception("Price refresh failed")
         return jsonify({"error": str(exc)}), 500
+    payload["mode"] = mode
     return jsonify(payload)
 
 

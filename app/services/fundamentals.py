@@ -488,13 +488,29 @@ class FundamentalsService:
         logger.info("refresh_company_tickers done companies=%d elapsed=%.1fs", count, time.monotonic() - t0)
         return {"inserted": count}
 
-    def refresh_fundamentals(self, tickers: list[str]) -> dict:
-        logger.info("refresh_fundamentals start tickers=%d", len(tickers))
+    def refresh_fundamentals(
+        self,
+        tickers: list[str],
+        *,
+        force_refresh: bool = False,
+        dry_run: bool = False,
+    ) -> dict:
+        logger.info(
+            "refresh_fundamentals start tickers=%d force_refresh=%s dry_run=%s",
+            len(tickers),
+            force_refresh,
+            dry_run,
+        )
         t0 = time.monotonic()
         inserted = 0
         refreshed = []
         skipped: list[dict] = []
         errors: list[dict] = []
+        skipped_overwrites = 0
+        planned_upserts = 0
+        overwrite_samples: list[dict] = []
+        from .safe_overwrite import partition_fundamentals_records
+
         for ticker in [ticker.upper() for ticker in tickers if ticker]:
             company = self.repo.get_company_by_ticker(ticker)
             if not company or not company.get("cik"):
@@ -547,9 +563,35 @@ class FundamentalsService:
                 )
                 continue
             records = normalize_company_facts(company["id"], payload)
-            count = self.repo.upsert_fundamentals(records)
+            stored = self.repo.fetch_fundamentals_overwrite_state(company["id"])
+            to_write, skipped_records = partition_fundamentals_records(
+                records,
+                stored,
+                force_refresh=force_refresh,
+            )
+            skipped_overwrites += len(skipped_records)
+            if len(overwrite_samples) < 5 and skipped_records:
+                overwrite_samples.extend(skipped_records[: max(0, 5 - len(overwrite_samples))])
+
+            if dry_run:
+                planned_upserts += len(to_write)
+                refreshed.append(ticker)
+                logger.debug(
+                    "refresh_fundamentals dry_run ticker=%s planned=%d skipped_overwrites=%d",
+                    ticker,
+                    len(to_write),
+                    len(skipped_records),
+                )
+                continue
+
+            count = self.repo.upsert_fundamentals(to_write)
             inserted += count
-            logger.debug("refresh_fundamentals ticker=%s records=%d", ticker, count)
+            logger.debug(
+                "refresh_fundamentals ticker=%s records=%d skipped_overwrites=%d",
+                ticker,
+                count,
+                len(skipped_records),
+            )
             self._refresh_company_scores(company["id"], ticker)
             inserted += self._materialize_snapshot_dimensions(company["id"], ticker)
             try:
@@ -561,29 +603,49 @@ class FundamentalsService:
             refreshed.append(ticker)
         elapsed = time.monotonic() - t0
         logger.info(
-            "refresh_fundamentals done tickers=%d skipped=%d errors=%d records=%d elapsed=%.1fs",
+            "refresh_fundamentals done tickers=%d skipped=%d errors=%d records=%d skipped_overwrites=%d dry_run=%s elapsed=%.1fs",
             len(refreshed),
             len(skipped),
             len(errors),
-            inserted,
+            inserted if not dry_run else planned_upserts,
+            skipped_overwrites,
+            dry_run,
             elapsed,
         )
         return {
             "tickers": refreshed,
             "recordsWritten": inserted,
+            "plannedUpserts": planned_upserts if dry_run else None,
+            "skippedOverwrites": skipped_overwrites,
+            "overwriteSamples": overwrite_samples,
+            "dryRun": dry_run,
+            "forceRefresh": force_refresh,
             "skipped": skipped,
             "errors": errors,
         }
 
-    def _refresh_company_scores(self, company_id: int, ticker: str) -> int:
+    def _refresh_company_scores(self, company_id: int, ticker: str) -> tuple[int, str]:
+        from .freshness import CURRENT_SCORING_VERSION
+
         rows = collapse_narrow_fundamentals_rows(
             self.repo.fetch_fundamentals_rows([ticker], dimension="ARY"),
             annual=True,
         )
         annual_rows = pivot_fundamentals_rows(rows, canonical_annual=True)
         if not annual_rows:
-            return 0
+            return 0, "no_annual_data"
         period_ends = [row.get("calendardate") for row in annual_rows if row.get("calendardate")]
+        if self.repo.should_skip_score_recompute(
+            company_id,
+            period_ends,
+            CURRENT_SCORING_VERSION,
+        ):
+            logger.debug(
+                "refresh_company_scores ticker=%s skipped_unchanged periods=%d",
+                ticker,
+                len(period_ends),
+            )
+            return 0, "skipped_unchanged"
         prices_by_period = self.repo.fetch_prices_by_period_ends(ticker, period_ends)
         score_records = compute_scores_for_periods(annual_rows, prices_by_period=prices_by_period)
         db_records = [
@@ -601,7 +663,7 @@ class FundamentalsService:
         ]
         written = self.repo.upsert_company_scores(company_id, db_records)
         logger.debug("refresh_company_scores ticker=%s periods=%d", ticker, written)
-        return written
+        return written, "recomputed"
 
     def _materialize_snapshot_dimensions(self, company_id: int, ticker: str) -> int:
         """Persist latest MRY/MRQ/MRT snapshot rows for fast dimension queries."""
@@ -656,50 +718,65 @@ class FundamentalsService:
         skipped: list[dict] = []
         ticker_timings: list[dict] = []
         periods_written = 0
+        skipped_unchanged = 0
         for ticker in target:
             company = self.repo.get_company_by_ticker(ticker)
             if not company:
                 skipped.append({"ticker": ticker, "reason": "not_found"})
                 continue
             t_ticker = time.monotonic()
-            written = self._refresh_company_scores(company["id"], ticker)
+            written, outcome = self._refresh_company_scores(company["id"], ticker)
             ticker_elapsed = time.monotonic() - t_ticker
             ticker_timings.append(
                 {
                     "ticker": ticker,
                     "periods": written,
+                    "outcome": outcome,
                     "elapsedSec": round(ticker_elapsed, 3),
                 }
             )
             if verbose:
                 logger.info(
-                    "refresh_company_scores_batch ticker=%s periods=%d elapsed=%.3fs",
+                    "refresh_company_scores_batch ticker=%s outcome=%s periods=%d elapsed=%.3fs",
                     ticker,
+                    outcome,
                     written,
+                    ticker_elapsed,
+                )
+            elif outcome == "skipped_unchanged":
+                logger.debug(
+                    "refresh_company_scores_batch ticker=%s skipped_unchanged elapsed=%.3fs",
+                    ticker,
                     ticker_elapsed,
                 )
             else:
                 logger.debug(
-                    "refresh_company_scores_batch ticker=%s periods=%d elapsed=%.3fs",
+                    "refresh_company_scores_batch ticker=%s outcome=%s periods=%d elapsed=%.3fs",
                     ticker,
+                    outcome,
                     written,
                     ticker_elapsed,
                 )
-            if written:
+            if outcome == "recomputed" and written:
                 refreshed.append(ticker)
                 periods_written += written
+            elif outcome == "skipped_unchanged":
+                skipped_unchanged += 1
             else:
-                skipped.append({"ticker": ticker, "reason": "no_annual_data"})
+                skipped.append({"ticker": ticker, "reason": outcome})
         elapsed = time.monotonic() - t0
         logger.info(
-            "refresh_company_scores_batch done tickers=%d skipped=%d periods=%d elapsed=%.1fs",
+            "refresh_company_scores_batch done recomputed=%d skipped_unchanged=%d skipped=%d periods=%d elapsed=%.1fs",
             len(refreshed),
+            skipped_unchanged,
             len(skipped),
             periods_written,
             elapsed,
         )
         return {
             "tickers": refreshed,
+            "recomputed": len(refreshed),
+            "skipped_unchanged": skipped_unchanged,
             "periodsWritten": periods_written,
             "skipped": skipped,
             "tickerTimings": ticker_timings,

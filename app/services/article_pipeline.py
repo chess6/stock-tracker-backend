@@ -72,6 +72,21 @@ class ArticlePipeline:
                 self.repo.set_article_extraction_status(article_id, "failed")
         return title, summary, body
 
+    def _cached_embedding_vector(self, row: dict) -> list[float] | None:
+        if not self.enable_embeddings:
+            return None
+        article_id = row.get("id")
+        content_hash = row.get("content_hash")
+        if not article_id or not content_hash:
+            return None
+        stored_hash = self.repo.get_article_embedding_hash(article_id, model=self.embedding_model)
+        if stored_hash != content_hash:
+            return None
+        vector = self.repo.get_article_embedding_vector(article_id, model=self.embedding_model)
+        if vector:
+            logger.debug("embedding skip article_id=%s unchanged content_hash", article_id)
+        return vector
+
     def _finalize_article(
         self,
         prepared: _PreparedArticle,
@@ -176,10 +191,11 @@ class ArticlePipeline:
 
         self.repo.set_article_pipeline_status(article_id, "processing")
         title, summary, body = self._extract_article_content(article_id, row)
+        row = self.repo.get_article_by_id(article_id) or row
         full_text = self._full_text(title, summary, body)
 
-        vector = None
-        if self.enable_embeddings:
+        vector = self._cached_embedding_vector(row)
+        if vector is None and self.enable_embeddings:
             vector = embed_text(full_text, model_name=self.embedding_model, device="cpu")
 
         finbert = None
@@ -258,18 +274,30 @@ class ArticlePipeline:
 
         vectors: list[list[float] | None] = [None] * len(prepared_items)
         if self.enable_embeddings:
-            if use_gpu_batch:
-                vectors = embed_texts_batch(
-                    texts,
-                    model_name=self.embedding_model,
-                    device=nlp_device,
-                    batch_size=32,
-                )
-            else:
-                vectors = [
-                    embed_text(text, model_name=self.embedding_model, device="cpu")
-                    for text in texts
-                ]
+            missing_indices: list[int] = []
+            missing_texts: list[str] = []
+            for idx, prepared in enumerate(prepared_items):
+                cached = self._cached_embedding_vector(prepared.row)
+                if cached is not None:
+                    vectors[idx] = cached
+                else:
+                    missing_indices.append(idx)
+                    missing_texts.append(prepared.full_text)
+            if missing_texts:
+                if use_gpu_batch:
+                    computed = embed_texts_batch(
+                        missing_texts,
+                        model_name=self.embedding_model,
+                        device=nlp_device,
+                        batch_size=32,
+                    )
+                else:
+                    computed = [
+                        embed_text(text, model_name=self.embedding_model, device="cpu")
+                        for text in missing_texts
+                    ]
+                for idx, vector in zip(missing_indices, computed):
+                    vectors[idx] = vector
 
         for prepared, finbert, vector in zip(prepared_items, finbert_results, vectors):
             try:
@@ -354,16 +382,14 @@ class ArticlePipeline:
 
         vectors: list[list[float] | None] = [None] * len(ordered_rows)
         if self.enable_embeddings:
-            cached = {
-                article_id: self.repo.get_article_embedding_vector(article_id, model=self.embedding_model)
-                for article_id in (row["id"] for row in ordered_rows)
-            }
             missing_indices: list[int] = []
             missing_texts: list[str] = []
             for idx, row in enumerate(ordered_rows):
                 article_id = row["id"]
-                vectors[idx] = cached.get(article_id)
-                if vectors[idx] is None and texts[idx]:
+                cached = self._cached_embedding_vector(row)
+                if cached is not None:
+                    vectors[idx] = cached
+                elif texts[idx]:
                     missing_indices.append(idx)
                     missing_texts.append(texts[idx])
             if missing_texts:

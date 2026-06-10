@@ -454,6 +454,54 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+    fundamentals_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(fundamentals)").fetchall()
+    }
+    if "source_updated_at" not in fundamentals_cols:
+        conn.execute("ALTER TABLE fundamentals ADD COLUMN source_updated_at TEXT")
+
+    company_scores_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(company_scores)").fetchall()
+    }
+    if "scoring_version" not in company_scores_cols:
+        conn.execute(
+            "ALTER TABLE company_scores ADD COLUMN scoring_version INTEGER NOT NULL DEFAULT 1"
+        )
+
+    if "enrichment_version" not in article_cols:
+        conn.execute(
+            "ALTER TABLE articles ADD COLUMN enrichment_version INTEGER NOT NULL DEFAULT 0"
+        )
+
+    embedding_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(article_embedding_vectors)").fetchall()
+    }
+    if embedding_cols and "updated_at" not in embedding_cols:
+        conn.execute(
+            "ALTER TABLE article_embedding_vectors ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        )
+        conn.execute(
+            """
+            UPDATE article_embedding_vectors
+            SET updated_at = created_at
+            WHERE updated_at IS NULL OR updated_at = ''
+            """
+        )
+
+    prices_cols = {row[1] for row in conn.execute("PRAGMA table_info(prices)").fetchall()}
+    if prices_cols and "fetched_at" not in prices_cols:
+        conn.execute(
+            "ALTER TABLE prices ADD COLUMN fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        )
+        conn.execute(
+            """
+            UPDATE prices
+            SET fetched_at = created_at
+            WHERE fetched_at IS NULL OR fetched_at = ''
+            """
+        )
+
     conn.commit()
 
 

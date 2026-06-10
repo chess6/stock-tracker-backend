@@ -40,6 +40,26 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         tickers = payload.get("tickers") or ctx.default_tickers
         return ctx.fundamentals.refresh_company_scores_batch(tickers)
 
+    def pipeline_refresh(payload: dict) -> dict:
+        from ..services.pipeline_refresh import PipelineRefreshService
+
+        result = PipelineRefreshService(
+            ctx.repo,
+            ctx.fundamentals,
+            ctx.prices,
+            ctx.news,
+        ).run(
+            payload.get("mode", "force_refresh"),
+            tickers=payload.get("tickers"),
+            article_limit=int(payload.get("limit", 50)),
+            ingest_feeds=payload.get("ingest_feeds"),
+            force_refresh=bool(payload.get("force_refresh", False)),
+            dry_run=bool(payload.get("dry_run", False)),
+        )
+        if result.get("error"):
+            raise ValueError(result["error"])
+        return result
+
     def ingest_default_feeds(payload: dict) -> dict:
         kwargs = {
             "extract_articles": payload.get("extract_articles", True),
@@ -135,6 +155,7 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         "sync_companies": sync_companies,
         "refresh_fundamentals": refresh_fundamentals,
         "refresh_company_scores": refresh_company_scores,
+        "pipeline_refresh": pipeline_refresh,
         "enrich_metadata": enrich_metadata,
         "ingest_default_feeds": ingest_default_feeds,
         "refresh_prices": refresh_prices,

@@ -329,6 +329,9 @@ def test_refresh_fundamentals_continues_after_sec_404():
             self.fundamentals.extend(records)
             return len(records)
 
+        def fetch_fundamentals_overwrite_state(self, company_id):
+            return {}
+
         def fetch_fundamentals_rows(self, tickers, gte=None, dimension=None):
             return []
 
