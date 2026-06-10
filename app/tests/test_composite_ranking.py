@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from app.db import get_db
 from app.repositories import Repository
 from app.services.composite_ranking import (
@@ -148,6 +150,40 @@ def test_deep_value_includes_sentiment_divergence_with_snapshot(app, client):
 def test_rank_history_not_found(app, client):
     response = client.get("/api/research/rank/history/ZZZZ?composite=deep_value")
     assert response.status_code == 404
+
+
+def test_rank_delta_vs_prior_snapshot(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+        prior_date = (date.today() - timedelta(days=8)).isoformat()
+        repo.upsert_company_rank_snapshots([
+            {
+                "ticker": "AAPL",
+                "composite": "deep_value",
+                "snapshot_date": prior_date,
+                "composite_score": 0.55,
+                "rank_in_universe": 12,
+                "factors": [],
+            }
+        ])
+
+    response = client.get("/api/research/rank?composite=deep_value&tickers=AAPL&limit=5")
+    assert response.status_code == 200
+    row = response.get_json()["results"][0]
+    assert row["rank"] == 1
+    assert row["rank_delta"] == 11
+
+
+def test_rank_delta_null_without_prior_snapshot(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+
+    response = client.get("/api/research/rank?composite=deep_value&tickers=AAPL&limit=5")
+    assert response.status_code == 200
+    row = response.get_json()["results"][0]
+    assert row.get("rank_delta") is None
 
 
 def test_rerating_candidate_composite_preset(app, client):

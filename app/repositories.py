@@ -761,6 +761,45 @@ class Repository:
         self.conn.commit()
         return len(rows)
 
+    def fetch_company_ranks_on_or_before_date(
+        self,
+        tickers: list[str],
+        *,
+        composite: str,
+        as_of_date: str,
+    ) -> dict[str, int]:
+        """Most recent rank_in_universe per ticker on or before as_of_date."""
+        if not tickers:
+            return {}
+        placeholders = ",".join("?" for _ in tickers)
+        params = [t.strip().upper() for t in tickers] + [
+            composite.strip().lower(),
+            as_of_date,
+            composite.strip().lower(),
+        ]
+        rows = self.conn.execute(
+            f"""
+            SELECT rs.ticker, rs.rank_in_universe
+            FROM company_rank_snapshots rs
+            JOIN (
+                SELECT ticker, MAX(snapshot_date) AS snapshot_date
+                FROM company_rank_snapshots
+                WHERE ticker IN ({placeholders})
+                  AND composite = ?
+                  AND snapshot_date <= ?
+                GROUP BY ticker
+            ) prior ON prior.ticker = rs.ticker AND prior.snapshot_date = rs.snapshot_date
+            WHERE rs.composite = ?
+            """,
+            params,
+        ).fetchall()
+        output: dict[str, int] = {}
+        for row in rows:
+            rank = row["rank_in_universe"]
+            if rank is not None:
+                output[row["ticker"]] = int(rank)
+        return output
+
     def fetch_company_rank_history(
         self,
         ticker: str,

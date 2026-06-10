@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Callable
 
 from ..repositories import Repository
@@ -380,6 +380,21 @@ def run_composite_rank(
     for idx, row in enumerate(ranked[:slice_end], start=1):
         row["rank"] = idx
     results = ranked[:slice_end]
+
+    if results:
+        as_of_date = (date.today() - timedelta(days=7)).isoformat()
+        prior_ranks = repo.fetch_company_ranks_on_or_before_date(
+            [row["ticker"] for row in results],
+            composite=composite_key,
+            as_of_date=as_of_date,
+        )
+        for row in results:
+            prior_rank = prior_ranks.get(row["ticker"])
+            current_rank = row.get("rank")
+            if prior_rank is not None and current_rank is not None:
+                row["rank_delta"] = prior_rank - current_rank
+            else:
+                row["rank_delta"] = None
 
     return {
         "meta": {
