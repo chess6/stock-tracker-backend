@@ -205,3 +205,23 @@ def test_preferences_research_ui_round_trip(client):
 
     bad = client.put("/api/preferences", json={"researchColorMode": "invalid"})
     assert bad.status_code == 400
+
+
+def test_preferences_research_pinned_round_trip(client):
+    response = client.put(
+        "/api/preferences",
+        json={"researchPinnedTickers": ["aapl", "MSFT", "aapl"]},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["researchPinnedTickers"] == ["AAPL", "MSFT"]
+
+    reload_response = client.get("/api/preferences")
+    assert reload_response.status_code == 200
+    assert reload_response.get_json()["researchPinnedTickers"] == ["AAPL", "MSFT"]
+
+    too_many = client.put(
+        "/api/preferences",
+        json={"researchPinnedTickers": [f"T{i}" for i in range(25)]},
+    )
+    assert too_many.status_code == 400

@@ -7,6 +7,7 @@ from ..repositories import Repository
 from ..services.metric_registry import registry_for_api
 from ..services.prices import PricesService
 from ..services.research import ResearchService
+from ..services.screening import run_composable_screen
 from ..services.sector_stats import sector_stats_for_tickers
 
 research_bp = Blueprint("research", __name__, url_prefix="/api/research")
@@ -34,6 +35,16 @@ def research_sector_stats():
         from ..services.sector_stats import build_sector_stats
 
         payload = build_sector_stats(repo, sectors=sectors or None, metric_api_keys=metrics or None)
+    return jsonify(payload)
+
+
+@research_bp.route("/screen", methods=["POST"])
+def research_screen():
+    spec = request.get_json(silent=True) or {}
+    repo = Repository(get_db())
+    payload, status, error = run_composable_screen(repo, PricesService(repo), spec)
+    if error:
+        return jsonify({"error": error}), status
     return jsonify(payload)
 
 

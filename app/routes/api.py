@@ -283,6 +283,7 @@ def update_preferences():
     portfolio = body.get("portfolio")
     research_color_mode = body.get("researchColorMode")
     research_heat_legend = body.get("researchHeatLegend")
+    research_pinned_tickers = body.get("researchPinnedTickers")
     if theme is not None and theme not in {"dark", "light"}:
         return jsonify({"error": "theme must be 'dark' or 'light'"}), 400
     if portfolio is not None and not isinstance(portfolio, list):
@@ -293,6 +294,11 @@ def update_preferences():
         return jsonify({"error": "researchColorMode must be deep_value, historical, or sector"}), 400
     if research_heat_legend is not None and not isinstance(research_heat_legend, bool):
         return jsonify({"error": "researchHeatLegend must be a boolean"}), 400
+    if research_pinned_tickers is not None:
+        if not isinstance(research_pinned_tickers, list):
+            return jsonify({"error": "researchPinnedTickers must be an array of tickers"}), 400
+        if len(research_pinned_tickers) > 24:
+            return jsonify({"error": "researchPinnedTickers supports at most 24 tickers"}), 400
     normalized_portfolio = None
     if portfolio is not None:
         normalized_portfolio = [
@@ -301,11 +307,24 @@ def update_preferences():
             if str(ticker).strip()
         ]
     try:
+        normalized_pins = None
+        if research_pinned_tickers is not None:
+            seen_pins: set[str] = set()
+            normalized_pins = []
+            for ticker in research_pinned_tickers:
+                symbol = str(ticker).strip().upper()
+                if not symbol or symbol in seen_pins:
+                    continue
+                seen_pins.add(symbol)
+                normalized_pins.append(symbol)
+                if len(normalized_pins) >= 24:
+                    break
         payload = get_repo().update_user_preferences(
             theme=theme,
             portfolio=normalized_portfolio,
             research_color_mode=research_color_mode,
             research_heat_legend=research_heat_legend,
+            research_pinned_tickers=normalized_pins,
         )
     except Exception as exc:
         current_app.logger.exception("Failed to update preferences")

@@ -1987,6 +1987,23 @@ class Repository:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def fetch_insider_cluster_counts(self, tickers: list[str]) -> dict[str, int]:
+        if not tickers:
+            return {}
+        placeholders = ",".join("?" for _ in tickers)
+        rows = self.conn.execute(
+            f"""
+            SELECT c.ticker, COUNT(*) AS cluster_count
+            FROM insider_cluster_analysis ica
+            JOIN companies c ON c.id = ica.company_id
+            WHERE c.ticker IN ({placeholders})
+              AND COALESCE(ica.total_buy_value, 0) > 0
+            GROUP BY c.ticker
+            """,
+            [t.upper() for t in tickers],
+        ).fetchall()
+        return {row["ticker"]: int(row["cluster_count"]) for row in rows}
+
     def fetch_insider_buying_sums(
         self,
         tickers: list[str] | None = None,
@@ -2213,11 +2230,25 @@ class Repository:
         ui_prefs = self._parse_ui_prefs(row["ui_prefs_json"] if row else None)
         wl = self.get_watchlist("Portfolio")
         tickers = (wl or {}).get("tickers", [])
+        pinned = ui_prefs.get("researchPinnedTickers") or []
+        if not isinstance(pinned, list):
+            pinned = []
+        seen_pins: set[str] = set()
+        pinned_tickers = []
+        for ticker in pinned:
+            symbol = str(ticker).strip().upper()
+            if not symbol or symbol in seen_pins:
+                continue
+            seen_pins.add(symbol)
+            pinned_tickers.append(symbol)
+            if len(pinned_tickers) >= 24:
+                break
         return {
             "theme": theme,
             "portfolio": tickers,
             "researchColorMode": ui_prefs.get("researchColorMode", "deep_value"),
             "researchHeatLegend": ui_prefs.get("researchHeatLegend", True),
+            "researchPinnedTickers": pinned_tickers,
         }
 
     @staticmethod
@@ -2239,6 +2270,7 @@ class Repository:
         portfolio: list[str] | None = None,
         research_color_mode: str | None = None,
         research_heat_legend: bool | None = None,
+        research_pinned_tickers: list[str] | None = None,
     ) -> dict:
         if theme is not None:
             self.conn.execute(
@@ -2257,12 +2289,22 @@ class Repository:
         if research_heat_legend is not None:
             ui_updates["researchHeatLegend"] = research_heat_legend
         if ui_updates:
-            current = self.get_user_preferences()
-            merged = {
-                "researchColorMode": current.get("researchColorMode", "deep_value"),
-                "researchHeatLegend": current.get("researchHeatLegend", True),
-            }
+            merged = self._load_ui_prefs_dict()
             merged.update(ui_updates)
+            self._save_ui_prefs_dict(merged)
+        if research_pinned_tickers is not None:
+            seen_pins: set[str] = set()
+            normalized_pins = []
+            for ticker in research_pinned_tickers:
+                symbol = str(ticker).strip().upper()
+                if not symbol or symbol in seen_pins:
+                    continue
+                seen_pins.add(symbol)
+                normalized_pins.append(symbol)
+                if len(normalized_pins) >= 24:
+                    break
+            merged = self._load_ui_prefs_dict()
+            merged["researchPinnedTickers"] = normalized_pins
             self._save_ui_prefs_dict(merged)
         if portfolio is not None:
             normalized = [

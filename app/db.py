@@ -487,26 +487,23 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         row[1] for row in conn.execute("PRAGMA table_info(article_embedding_vectors)").fetchall()
     }
     if embedding_cols and "updated_at" not in embedding_cols:
-        conn.execute(
-            "ALTER TABLE article_embedding_vectors ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
-        )
+        # SQLite ALTER ADD cannot use CURRENT_TIMESTAMP as column default.
+        conn.execute("ALTER TABLE article_embedding_vectors ADD COLUMN updated_at TEXT")
         conn.execute(
             """
             UPDATE article_embedding_vectors
-            SET updated_at = created_at
+            SET updated_at = COALESCE(NULLIF(created_at, ''), datetime('now'))
             WHERE updated_at IS NULL OR updated_at = ''
             """
         )
 
     prices_cols = {row[1] for row in conn.execute("PRAGMA table_info(prices)").fetchall()}
     if prices_cols and "fetched_at" not in prices_cols:
-        conn.execute(
-            "ALTER TABLE prices ADD COLUMN fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
-        )
+        conn.execute("ALTER TABLE prices ADD COLUMN fetched_at TEXT")
         conn.execute(
             """
             UPDATE prices
-            SET fetched_at = created_at
+            SET fetched_at = COALESCE(NULLIF(created_at, ''), datetime('now'))
             WHERE fetched_at IS NULL OR fetched_at = ''
             """
         )
