@@ -6,7 +6,9 @@ from app.db import get_db
 from app.repositories import Repository
 from app.services.composite_ranking import (
     approximate_sector_percentile,
+    get_rank_history,
     run_composite_rank,
+    snapshot_composite_ranks,
 )
 from app.services.prices import PricesService
 from app.tests.test_screening import _seed_aapl_fundamentals
@@ -77,3 +79,48 @@ def test_run_composite_rank_service(app):
         assert error is None
         assert status == 200
         assert payload["results"][0]["ticker"] == "AAPL"
+
+
+def test_snapshot_and_rank_history(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+        repo.set_config("experimental_research_composite_rank", True)
+
+        snapshot = snapshot_composite_ranks(
+            repo,
+            PricesService(repo),
+            composites=["deep_value"],
+            universe=None,
+        )
+        assert snapshot["written"] >= 1
+
+        payload, status, error = get_rank_history(
+            repo,
+            ticker="AAPL",
+            composite="deep_value",
+            limit=30,
+        )
+        assert error is None
+        assert status == 200
+        assert payload["history"][-1]["composite_score"] is not None
+
+    response = client.get("/api/research/rank/history/AAPL?composite=deep_value&limit=10")
+    assert response.status_code == 200
+    history = response.get_json()["history"]
+    assert len(history) >= 1
+    assert history[0]["snapshot_date"]
+
+
+def test_rank_history_disabled_by_default(app, client):
+    response = client.get("/api/research/rank/history/AAPL")
+    assert response.status_code == 403
+
+
+def test_rank_history_not_found(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.set_config("experimental_research_composite_rank", True)
+
+    response = client.get("/api/research/rank/history/ZZZZ?composite=deep_value")
+    assert response.status_code == 404

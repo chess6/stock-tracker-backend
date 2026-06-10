@@ -726,6 +726,74 @@ class Repository:
         ).fetchall()
         return [self._format_score_row(row) for row in rows]
 
+    def upsert_company_rank_snapshots(self, records: Iterable[dict]) -> int:
+        import json
+
+        rows = []
+        for record in records:
+            factors = record.get("factors")
+            factor_json = json.dumps(factors) if factors is not None else None
+            rows.append(
+                (
+                    str(record["ticker"]).strip().upper(),
+                    str(record["composite"]).strip().lower(),
+                    record["snapshot_date"],
+                    record.get("composite_score"),
+                    record.get("rank_in_universe"),
+                    factor_json,
+                )
+            )
+        if not rows:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO company_rank_snapshots (
+                ticker, composite, snapshot_date,
+                composite_score, rank_in_universe, factor_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, composite, snapshot_date) DO UPDATE SET
+                composite_score=excluded.composite_score,
+                rank_in_universe=excluded.rank_in_universe,
+                factor_json=excluded.factor_json
+            """,
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def fetch_company_rank_history(
+        self,
+        ticker: str,
+        *,
+        composite: str,
+        limit: int = 90,
+    ) -> list[dict]:
+        import json
+
+        rows = self.conn.execute(
+            """
+            SELECT snapshot_date, composite_score, rank_in_universe, factor_json
+            FROM company_rank_snapshots
+            WHERE ticker = ? AND composite = ?
+            ORDER BY snapshot_date DESC
+            LIMIT ?
+            """,
+            (ticker.strip().upper(), composite.strip().lower(), max(1, int(limit))),
+        ).fetchall()
+        history = []
+        for row in rows:
+            item = dict(row)
+            raw_factors = item.pop("factor_json", None)
+            if raw_factors:
+                try:
+                    item["factors"] = json.loads(raw_factors)
+                except (TypeError, ValueError):
+                    item["factors"] = None
+            else:
+                item["factors"] = None
+            history.append(item)
+        return list(reversed(history))
+
     def fetch_latest_company_scores(
         self,
         tickers: list[str],

@@ -7,7 +7,7 @@ from ..repositories import Repository
 from ..services.metric_registry import registry_for_api
 from ..services.prices import PricesService
 from ..services.research import ResearchService
-from ..services.composite_ranking import run_composite_rank
+from ..services.composite_ranking import get_rank_history, run_composite_rank
 from ..services.feature_flags import is_enabled
 from ..services.screening import run_composable_screen
 from ..services.sector_stats import sector_stats_for_tickers
@@ -76,6 +76,35 @@ def research_rank():
         tickers=tickers or None,
         limit=limit,
     )
+    if error:
+        return jsonify({"error": error}), status
+    return jsonify(payload)
+
+
+@research_bp.route("/rank/history/<ticker>", methods=["GET"])
+def research_rank_history(ticker: str):
+    repo = Repository(get_db())
+    if not is_enabled("experimental_research_composite_rank", repo):
+        return jsonify({
+            "error": "Composite ranking is disabled",
+            "featureFlag": "experimental_research_composite_rank",
+        }), 403
+
+    composite = request.args.get("composite", "deep_value")
+    limit_raw = request.args.get("limit", 90)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit must be an integer"}), 400
+
+    payload, status, error = get_rank_history(
+        repo,
+        ticker=ticker,
+        composite=composite,
+        limit=limit,
+    )
+    if error == "not_found":
+        return jsonify({"error": "not_found", "ticker": ticker.strip().upper()}), 404
     if error:
         return jsonify({"error": error}), status
     return jsonify(payload)

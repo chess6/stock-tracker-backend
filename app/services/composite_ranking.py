@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import date
 from typing import Any, Callable
 
 from ..repositories import Repository
@@ -274,7 +275,7 @@ def run_composite_rank(
     composite: str,
     universe: str | None = None,
     tickers: list[str] | None = None,
-    limit: int = DEFAULT_LIMIT,
+    limit: int | None = DEFAULT_LIMIT,
 ) -> tuple[dict | None, int, str | None]:
     composite_key = (composite or "").strip().lower()
     preset = _COMPOSITE_PRESETS.get(composite_key)
@@ -282,12 +283,13 @@ def run_composite_rank(
         known = ", ".join(known_composites())
         return None, 400, f"Unknown composite: {composite}. Known: {known}"
 
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError):
-        return None, 400, "limit must be an integer"
-    if limit < 1 or limit > MAX_LIMIT:
-        return None, 400, f"limit must be between 1 and {MAX_LIMIT}"
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            return None, 400, "limit must be an integer"
+        if limit < 1 or limit > MAX_LIMIT:
+            return None, 400, f"limit must be between 1 and {MAX_LIMIT}"
 
     symbol_list = tickers
     if not symbol_list:
@@ -309,7 +311,7 @@ def run_composite_rank(
                 "universeSize": len(symbol_list),
                 "evaluated": 0,
                 "returned": 0,
-                "limit": limit,
+                "limit": limit if limit is not None else len(symbol_list),
             },
             "results": [],
         }, 200, None
@@ -337,9 +339,10 @@ def run_composite_rank(
         })
 
     ranked.sort(key=lambda row: (-row["compositeScore"], row["ticker"]))
-    for idx, row in enumerate(ranked[:limit], start=1):
+    slice_end = len(ranked) if limit is None else limit
+    for idx, row in enumerate(ranked[:slice_end], start=1):
         row["rank"] = idx
-    results = ranked[:limit]
+    results = ranked[:slice_end]
 
     return {
         "meta": {
@@ -350,7 +353,107 @@ def run_composite_rank(
             "evaluated": len(candidates),
             "scored": len(ranked),
             "returned": len(results),
-            "limit": limit,
+            "limit": limit if limit is not None else len(results),
         },
         "results": results,
+    }, 200, None
+
+
+def snapshot_composite_ranks(
+    repo: Repository,
+    prices_service: PricesService,
+    *,
+    composites: list[str] | None = None,
+    universe: str = "sp500",
+    snapshot_date: str | None = None,
+) -> dict[str, Any]:
+    """Persist today's composite ranks for nightly history tracking."""
+    snapshot_day = snapshot_date or date.today().isoformat()
+    composite_keys = composites or known_composites()
+    written = 0
+    per_composite: dict[str, dict[str, int]] = {}
+
+    for composite_key in composite_keys:
+        payload, status, error = run_composite_rank(
+            repo,
+            prices_service,
+            composite=composite_key,
+            universe=universe,
+            limit=None,
+        )
+        if error or not payload:
+            per_composite[composite_key] = {"scored": 0, "written": 0, "error": error or "empty"}
+            continue
+
+        records = [
+            {
+                "ticker": row["ticker"],
+                "composite": composite_key,
+                "snapshot_date": snapshot_day,
+                "composite_score": row["compositeScore"],
+                "rank_in_universe": row.get("rank"),
+                "factors": row.get("factors"),
+            }
+            for row in payload.get("results") or []
+        ]
+        count = repo.upsert_company_rank_snapshots(records)
+        written += count
+        per_composite[composite_key] = {
+            "scored": payload["meta"].get("scored", 0),
+            "written": count,
+        }
+        logger.info(
+            "snapshot_composite_ranks composite=%s universe=%s written=%d scored=%d",
+            composite_key,
+            universe,
+            count,
+            payload["meta"].get("scored", 0),
+        )
+
+    return {
+        "snapshotDate": snapshot_day,
+        "universe": universe,
+        "written": written,
+        "composites": per_composite,
+    }
+
+
+def get_rank_history(
+    repo: Repository,
+    *,
+    ticker: str,
+    composite: str,
+    limit: int = 90,
+) -> tuple[dict | None, int, str | None]:
+    composite_key = (composite or "").strip().lower()
+    if composite_key not in _COMPOSITE_PRESETS:
+        known = ", ".join(known_composites())
+        return None, 400, f"Unknown composite: {composite}. Known: {known}"
+
+    symbol = (ticker or "").strip().upper()
+    if not symbol:
+        return None, 400, "ticker is required"
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return None, 400, "limit must be an integer"
+    if limit < 1 or limit > 365:
+        return None, 400, "limit must be between 1 and 365"
+
+    company = repo.get_company_by_ticker(symbol)
+    if not company:
+        return None, 404, "not_found"
+
+    history = repo.fetch_company_rank_history(symbol, composite=composite_key, limit=limit)
+    preset = _COMPOSITE_PRESETS[composite_key]
+    return {
+        "meta": {
+            "ticker": symbol,
+            "composite": composite_key,
+            "label": preset["label"],
+            "returned": len(history),
+            "limit": limit,
+        },
+        "history": history,
     }, 200, None

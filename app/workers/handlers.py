@@ -40,6 +40,19 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         tickers = payload.get("tickers") or ctx.default_tickers
         return ctx.fundamentals.refresh_company_scores_batch(tickers)
 
+    def snapshot_composite_ranks(payload: dict) -> dict:
+        from ..services.composite_ranking import snapshot_composite_ranks as run_snapshot
+
+        universe = payload.get("universe") or "sp500"
+        composites = payload.get("composites")
+        return run_snapshot(
+            ctx.repo,
+            ctx.prices,
+            composites=composites,
+            universe=universe,
+            snapshot_date=payload.get("snapshot_date"),
+        )
+
     def pipeline_refresh(payload: dict) -> dict:
         from ..services.pipeline_refresh import PipelineRefreshService
 
@@ -155,6 +168,7 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         "sync_companies": sync_companies,
         "refresh_fundamentals": refresh_fundamentals,
         "refresh_company_scores": refresh_company_scores,
+        "snapshot_composite_ranks": snapshot_composite_ranks,
         "pipeline_refresh": pipeline_refresh,
         "enrich_metadata": enrich_metadata,
         "ingest_default_feeds": ingest_default_feeds,

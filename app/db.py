@@ -317,6 +317,21 @@ CREATE TABLE IF NOT EXISTS insider_cluster_analysis (
 
 CREATE INDEX IF NOT EXISTS idx_insider_cluster_company ON insider_cluster_analysis(company_id, window_start DESC);
 CREATE INDEX IF NOT EXISTS idx_insider_cluster_intensity ON insider_cluster_analysis(intensity_score DESC);
+
+CREATE TABLE IF NOT EXISTS company_rank_snapshots (
+    ticker TEXT NOT NULL,
+    composite TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    composite_score REAL,
+    rank_in_universe INTEGER,
+    factor_json TEXT,
+    PRIMARY KEY (ticker, composite, snapshot_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rank_snapshots_composite_date
+    ON company_rank_snapshots(composite, snapshot_date DESC);
+CREATE INDEX IF NOT EXISTS idx_rank_snapshots_ticker_composite
+    ON company_rank_snapshots(ticker, composite, snapshot_date DESC);
 """
 
 
@@ -520,6 +535,32 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_company_tags_tag ON company_tags(tag)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS company_rank_snapshots (
+            ticker TEXT NOT NULL,
+            composite TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            composite_score REAL,
+            rank_in_universe INTEGER,
+            factor_json TEXT,
+            PRIMARY KEY (ticker, composite, snapshot_date)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_rank_snapshots_composite_date
+        ON company_rank_snapshots(composite, snapshot_date DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_rank_snapshots_ticker_composite
+        ON company_rank_snapshots(ticker, composite, snapshot_date DESC)
+        """
     )
 
     conn.commit()
