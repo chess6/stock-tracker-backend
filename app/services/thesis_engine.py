@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from ..repositories import Repository
@@ -13,6 +14,17 @@ from .prices import PricesService
 logger = logging.getLogger("stock_tracker.thesis_engine")
 
 Polarity = Literal["bull", "bear"]
+
+# Unscored bear watchlist — not a pillar factor.
+SHORT_INTEREST_BEAR_THRESHOLD_PCT = 5.0
+
+# Staleness windows for evidence-coverage downgrade (R3.4).
+STALENESS_FUNDAMENTALS_DAYS = 18 * 30
+STALENESS_PRICES_DAYS = 30
+STALENESS_INSIDERS_DAYS = 90
+STALENESS_NEWS_DAYS = 14
+STALENESS_PENALTY_PER_CATEGORY = 0.12
+STALENESS_MIN_PENALTY = 0.45
 
 SIGNAL_CLASSES = (
     "accounting",
@@ -108,6 +120,13 @@ def _format_template(template: str, raw: dict[str, Any]) -> str:
         return template
 
 
+def _has_traceable_raw(raw: dict[str, Any] | None) -> bool:
+    """Require at least one non-null evidence field in the factor raw payload."""
+    if not raw:
+        return False
+    return any(value is not None for value in raw.values())
+
+
 def _statement_from_factor(
     pillar: str,
     factor: dict[str, Any],
@@ -116,16 +135,12 @@ def _statement_from_factor(
 ) -> dict[str, Any] | None:
     key = factor.get("key")
     raw = factor.get("raw") or {}
-    if not raw:
+    if not _has_traceable_raw(raw):
         return None
     template_key = (pillar, key, polarity)
     template = _TEMPLATES.get(template_key)
     if not template:
-        normalized = factor.get("normalized")
-        if normalized is None:
-            return None
-        direction = "supports" if polarity == "bull" else "weakens"
-        template = f"Factor {key} ({normalized:.0%} normalized) {direction} the {polarity} case."
+        return None
     text = _format_template(template, raw)
     return {
         "pillar": pillar,
@@ -376,15 +391,126 @@ def _build_disconfirming_conditions(
     return conditions[:5]
 
 
-def _compute_evidence_coverage(pillars: list[dict[str, Any]]) -> dict[str, Any]:
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")[:10]).date()
+    except ValueError:
+        return None
+
+
+def _days_since(value: str | None) -> int | None:
+    parsed = _parse_iso_date(value)
+    if parsed is None:
+        return None
+    return (date.today() - parsed).days
+
+
+def assess_data_staleness(
+    repo: Repository,
+    ticker: str,
+    gate_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Flag stale inputs and compute a freshness penalty for evidence coverage."""
+    symbol = ticker.strip().upper()
+    row = gate_inputs.get("row") or {}
+    categories: list[str] = []
+    details: dict[str, Any] = {}
+
+    filing_age = _days_since(row.get("filingdate") or row.get("filing_date"))
+    if filing_age is None or filing_age > STALENESS_FUNDAMENTALS_DAYS:
+        categories.append("fundamentals")
+    details["fundamentalsDays"] = filing_age
+
+    price_rows = repo.fetch_prices_batch([symbol], limit_per_ticker=1).get(symbol, [])
+    price_date = price_rows[0].get("date") if price_rows else None
+    price_age = _days_since(price_date)
+    if price_age is None or price_age > STALENESS_PRICES_DAYS:
+        categories.append("prices")
+    details["priceDays"] = price_age
+
+    ownership = repo.fetch_latest_insider_ownership(symbol)
+    insider_date = (ownership or {}).get("computed_at") or (ownership or {}).get("as_of_date")
+    insider_age = _days_since(insider_date)
+    if insider_age is None or insider_age > STALENESS_INSIDERS_DAYS:
+        categories.append("insiders")
+    details["insiderDays"] = insider_age
+
+    narrative = repo.fetch_latest_narrative_snapshots([symbol]).get(symbol) or {}
+    news_date = narrative.get("computed_at") or narrative.get("snapshot_date")
+    news_age = _days_since(news_date)
+    if news_age is None or news_age > STALENESS_NEWS_DAYS:
+        categories.append("news")
+    details["newsDays"] = news_age
+
+    penalty = max(
+        STALENESS_MIN_PENALTY,
+        1.0 - STALENESS_PENALTY_PER_CATEGORY * len(categories),
+    )
+    return {
+        "staleCategories": categories,
+        "freshnessPenalty": round(penalty, 4),
+        "details": details,
+    }
+
+
+def _short_interest_bear_statement(gate_inputs: dict[str, Any]) -> dict[str, Any] | None:
+    """Append unscored bear context when short interest exceeds threshold."""
+    market = gate_inputs.get("market") or {}
+    short_pct = market.get("short_interest_pct")
+    if short_pct is None or not (0 < float(short_pct)):
+        return None
+    short_pct = float(short_pct)
+    if short_pct < SHORT_INTEREST_BEAR_THRESHOLD_PCT:
+        return None
+    return {
+        "pillar": "market_sentiment",
+        "factorKey": "short_interest_pct",
+        "polarity": "bear",
+        "text": (
+            f"Short interest {short_pct:.1f}% of float — elevated short positioning signals crowded "
+            "bearish consensus (squeeze risk is secondary; not scored in pillars)."
+        ),
+        "raw": {
+            "shortInterestPct": short_pct,
+            "asOfDate": market.get("short_interest_as_of"),
+            "source": market.get("short_interest_source"),
+            "thresholdPct": SHORT_INTEREST_BEAR_THRESHOLD_PCT,
+        },
+        "signalClass": "market",
+        "scored": False,
+    }
+
+
+def _compute_evidence_coverage(
+    pillars: list[dict[str, Any]],
+    *,
+    staleness: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not pillars:
-        return {"overall": 0.0, "perPillar": {}}
+        payload: dict[str, Any] = {"overall": 0.0, "perPillar": {}}
+        if staleness:
+            payload["staleness"] = staleness
+        return payload
     per_pillar = {
         pillar["pillar"]: pillar.get("evidenceCoverage") or 0.0
         for pillar in pillars
     }
     overall = sum(per_pillar.values()) / len(per_pillar) if per_pillar else 0.0
-    return {"overall": round(overall, 4), "perPillar": per_pillar}
+    penalty = float((staleness or {}).get("freshnessPenalty") or 1.0)
+    adjusted_per_pillar = {
+        key: round(value * penalty, 4)
+        for key, value in per_pillar.items()
+    }
+    payload = {
+        "overall": round(overall * penalty, 4),
+        "perPillar": adjusted_per_pillar,
+        "rawOverall": round(overall, 4),
+    }
+    if staleness:
+        payload["staleness"] = staleness
+    return payload
 
 
 def _compute_signal_independence(
@@ -494,21 +620,27 @@ def build_thesis(
             },
             "sections": {
                 "preMortem": pre_mortem,
-                "bearCase": _collect_factor_statements(pillars, polarity="bear", limit=4) if pillars else [],
+                "bearCase": [],
                 "bullCase": [],
-                "valuationAssessment": _build_valuation_assessment(gate_inputs),
-                "catalystWatchlist": _build_catalyst_watchlist(gate_inputs, pillars=pillars),
-                "disconfirmingConditions": _build_disconfirming_conditions(gate_payload, pillars),
-                "evidenceCoverage": _compute_evidence_coverage(pillars),
-                "signalIndependence": _compute_signal_independence([], []),
+                "valuationAssessment": None,
+                "catalystWatchlist": [],
+                "disconfirmingConditions": [],
+                "evidenceCoverage": None,
+                "signalIndependence": None,
             },
-            "pillars": pillars,
+            "pillars": [],
             "gates": gate_payload.get("gates") or [],
         }
 
     bear_case = _collect_factor_statements(pillars, polarity="bear", limit=6)
+    short_bear = _short_interest_bear_statement(gate_inputs)
+    if short_bear:
+        bear_case = bear_case + [short_bear]
+        bear_case = bear_case[:6]
     bull_raw = _collect_factor_statements(pillars, polarity="bull", limit=6)
     bull_case = _pair_bull_rebuttals(bear_case, bull_raw)
+
+    staleness = gate_inputs.get("staleness")
 
     return {
         "ticker": ticker,
@@ -520,7 +652,7 @@ def build_thesis(
             "valuationAssessment": _build_valuation_assessment(gate_inputs),
             "catalystWatchlist": _build_catalyst_watchlist(gate_inputs, pillars=pillars),
             "disconfirmingConditions": _build_disconfirming_conditions(gate_payload, pillars),
-            "evidenceCoverage": _compute_evidence_coverage(pillars),
+            "evidenceCoverage": _compute_evidence_coverage(pillars, staleness=staleness),
             "signalIndependence": _compute_signal_independence(bear_case, bull_raw),
         },
         "pillars": pillars,
@@ -550,11 +682,22 @@ def evaluate_thesis_for_ticker(
     activist = repo.fetch_company_activist_filings(symbol, limit=1)
     gate_inputs["edgar"] = {"activist_filing": activist[0] if activist else None}
 
+    short_row = repo.fetch_latest_market_data(symbol, "short_interest_pct")
+    if short_row and short_row.get("value") is not None:
+        gate_inputs["market"] = {
+            "short_interest_pct": float(short_row["value"]),
+            "short_interest_as_of": short_row.get("as_of_date"),
+            "short_interest_source": short_row.get("source"),
+        }
+
+    gate_inputs["staleness"] = assess_data_staleness(repo, symbol, gate_inputs)
+
     pillar_payload = evaluate_pillars_for_ticker(
         repo,
         symbol,
         prices_service=prices_service,
         gate_payload=gate_payload,
+        gate_inputs=gate_inputs,
     )
     if pillar_payload is None:
         return None

@@ -43,6 +43,7 @@ def _evaluate_gates_from_snapshot_row(
     Falls back to unknown gates when historical rows are missing.
     """
     from .gate_engine import (
+        edgar_trigger_state_as_of,
         evaluate_accounting_integrity,
         evaluate_margin_of_safety,
         evaluate_secular_decline,
@@ -84,18 +85,27 @@ def _evaluate_gates_from_snapshot_row(
             "interest_coverage": metrics.get("interest_coverage") or interest_coverage(wide),
         }
 
+    flags = repo.fetch_company_edgar_flags(ticker)
+    events = repo.fetch_company_edgar_events(ticker, limit=50)
+    as_of = _parse_date(snapshot_date)
+    edgar_triggers = (
+        edgar_trigger_state_as_of(flags, events, as_of)
+        if as_of is not None
+        else {
+            "going_concern": False,
+            "nt_filing": False,
+            "restatement": False,
+            "auditor_change_12m": False,
+        }
+    )
+
     inputs = {
         "ticker": ticker,
         "scores": scores or {},
         "latent": latent,
         "metrics": metrics,
         "derived": derived,
-        "edgar_triggers": {
-            "going_concern": False,
-            "nt_filing": False,
-            "restatement": False,
-            "auditor_change_12m": False,
-        },
+        "edgar_triggers": edgar_triggers,
         "operational_recovery": {"operationalRecovery": None},
         "margin_trends": {},
         "narrative_states": [],

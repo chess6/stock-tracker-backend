@@ -71,13 +71,21 @@ def _peer_annual_histories(repo: Repository, sector: str | None, *, exclude_tick
     peer_tickers = [
         t for t in repo.fetch_sector_tickers(sector, limit=limit) if t.upper() != exclude_ticker.upper()
     ]
+    if not peer_tickers:
+        return []
+    narrow = collapse_narrow_fundamentals_rows(
+        repo.fetch_fundamentals_rows(peer_tickers, dimension="ARY"),
+        annual=True,
+    )
+    by_ticker: dict[str, list[dict]] = {}
+    for row in narrow:
+        ticker = row.get("ticker")
+        if not ticker:
+            continue
+        by_ticker.setdefault(ticker, []).append(row)
     histories: list[list[dict]] = []
-    for peer in peer_tickers:
-        narrow = collapse_narrow_fundamentals_rows(
-            repo.fetch_fundamentals_rows([peer], dimension="ARY"),
-            annual=True,
-        )
-        wide = pivot_fundamentals_rows(narrow, canonical_annual=True)
+    for peer_rows in by_ticker.values():
+        wide = pivot_fundamentals_rows(peer_rows, canonical_annual=True)
         if len(wide) >= 2:
             histories.append(wide)
     return histories

@@ -226,6 +226,31 @@ def test_margin_of_safety_passes_nav_discount():
     assert result["triggered_by"] == "price_below_conservative_nav"
 
 
+def test_margin_of_safety_does_not_pass_on_negative_nav_ratio():
+    result = evaluate_margin_of_safety(
+        _base_inputs(
+            latent={"price_to_conservative_nav": -33.87, "conservative_nav_per_share": -8.5},
+            derived={"owner_earnings_yield": 0.022, "fcf_yield": 0.022, "fcf_positive_streak": 2},
+            metrics={"pe": 38.0, "pb": 59.0, "earnings_yield": 0.025},
+        )
+    )
+    assert result["triggered_by"] != "price_below_conservative_nav"
+
+
+def test_solvency_runway_uses_near_term_debt_maturity_flag():
+    result = evaluate_solvency_runway(
+        _base_inputs(
+            scores={"survivability": 25.0, "survivability_bucket": "critical"},
+            latent={"runway_months": 8.0},
+            derived={"fcf": -10.0, "interest_coverage": 0.6, "fcf_positive_streak": 0},
+            debt_maturity_near_term=True,
+        )
+    )
+    assert result["status"] == "fail"
+    assert result["evidence"]["debtMaturityNearTerm"] is True
+    assert "near_term_debt_maturity_wall" in result["evidence"]["watchlistFlags"]
+
+
 def test_margin_of_safety_fails_multiples_only_above_nav():
     result = evaluate_margin_of_safety(
         _base_inputs(
@@ -271,7 +296,33 @@ def test_unknown_gate_does_not_block_investable():
     ]
     summary = summarize_gate_stack(gates)
     assert summary["investable"] is True
+    assert summary["noHardFails"] is True
+    assert summary["fullyEvaluated"] is False
+    assert summary["allPassed"] is False
     assert summary["unknownGates"] == ["accounting_integrity"]
+
+
+def test_edgar_trigger_state_as_of_excludes_future_filings():
+    from datetime import date
+
+    from app.services.gate_engine import edgar_trigger_state_as_of
+
+    as_of = date(2024, 6, 1)
+    flags = [{"flag_type": "going_concern", "filed_date": "2024-01-01"}]
+    future_restatement = edgar_trigger_state_as_of(
+        flags,
+        [{"item_number": "4.02", "filed_date": "2025-01-01"}],
+        as_of,
+    )
+    assert future_restatement["going_concern"] is True
+    assert future_restatement["restatement"] is False
+
+    past_restatement = edgar_trigger_state_as_of(
+        flags,
+        [{"item_number": "4.02", "filed_date": "2024-01-15"}],
+        as_of,
+    )
+    assert past_restatement["restatement"] is True
 
 
 def test_auditor_change_within_12_months_fails_accounting_gate():

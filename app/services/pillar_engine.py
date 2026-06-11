@@ -16,7 +16,12 @@ from .composite_ranking import (
     _factor_valuation_dislocation,
 )
 from .gate_engine import assemble_gate_inputs, evaluate_gate_stack, summarize_gate_stack
-from .metric_primitives import GATE_FCF_YIELD_PASS, GATE_OWNER_EARNINGS_YIELD_PASS, safe_div
+from .metric_primitives import (
+    GATE_FCF_YIELD_PASS,
+    GATE_OWNER_EARNINGS_YIELD_PASS,
+    debt_maturity_near_term_wall,
+    safe_div,
+)
 from .prices import PricesService
 from .scoring import altman_zone, _gross_margin
 from .screening import build_research_candidates
@@ -558,9 +563,7 @@ def assemble_pillar_candidate(
         if item.get("item_number") in {"2.05", "8.01"} or item.get("event_type") == "restructuring"
     ]
     debt_schedule = repo.fetch_company_debt_maturities(symbol)
-    near_term_debt = None
-    if debt_schedule:
-        near_term_debt = any((item.get("maturity_year") or 9999) <= 2 for item in debt_schedule)
+    near_term_debt = debt_maturity_near_term_wall(debt_schedule)
 
     narrative_snap = repo.fetch_latest_narrative_snapshots([symbol]).get(symbol) or {}
     annual_rows = gate_inputs.get("annual_rows") or []
@@ -690,23 +693,22 @@ def evaluate_pillars_for_ticker(
     *,
     prices_service: PricesService | None = None,
     gate_payload: dict[str, Any] | None = None,
+    gate_inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate pillar dashboard for one ticker; skipped when any gate fails."""
     symbol = ticker.strip().upper()
     if prices_service is None:
         prices_service = PricesService(repo)
 
-    if gate_payload is None:
+    if gate_inputs is None:
         gate_inputs = assemble_gate_inputs(repo, symbol, prices_service=prices_service)
         if gate_inputs is None:
             return None
+
+    if gate_payload is None:
         gates = evaluate_gate_stack(gate_inputs)
         summary = summarize_gate_stack(gates)
         gate_payload = {"ticker": symbol, "gates": gates, "summary": summary}
-    else:
-        gate_inputs = assemble_gate_inputs(repo, symbol, prices_service=prices_service)
-        if gate_inputs is None:
-            return None
 
     summary = gate_payload.get("summary") or {}
     if summary.get("skipPillars"):

@@ -25,6 +25,12 @@ from .sec_eligibility import should_skip_sec_fundamentals
 
 logger = logging.getLogger("stock_tracker.pipeline.edgar")
 
+_INSIDER_FORMS = frozenset({"3", "3/A", "4", "4/A", "5", "5/A"})
+
+
+def _is_insider_form(form: str | None) -> bool:
+    return (form or "").upper() in _INSIDER_FORMS
+
 
 class EdgarIngestionService:
     def __init__(
@@ -115,13 +121,43 @@ class EdgarIngestionService:
         activist: list[dict] = []
         holdings: list[dict] = []
         filings_checked = 0
+        insider_filings_checked = 0
+        max_insider_filings = min(50, self.max_filings_per_company)
         request_budget = self.max_total_requests
+
+        for idx, form in enumerate(forms):
+            if insider_filings_checked >= max_insider_filings:
+                break
+            if requests_made >= request_budget:
+                break
+            if not _is_insider_form(form):
+                continue
+            filing_date = filing_dates[idx] if idx < len(filing_dates) else None
+            accession = accessions[idx]
+            primary_document = primary_docs[idx] if idx < len(primary_docs) else None
+            if not primary_document:
+                continue
+            url = self._document_url(cik, accession, primary_document)
+            try:
+                xml_text = self.sec_client.get_text(url)
+                requests_made += 1
+                insider_filings_checked += 1
+            except Exception:
+                continue
+            if (form or "").startswith("3"):
+                holdings.extend(parse_form3_initial_holdings(xml_text, filing_date, accession))
+            elif (form or "").startswith("4"):
+                holdings.extend(parse_form4_post_holdings(xml_text, filing_date, accession))
+            if self.request_delay_seconds > 0:
+                time.sleep(self.request_delay_seconds)
 
         for idx, form in enumerate(forms):
             if filings_checked >= self.max_filings_per_company:
                 break
             if requests_made >= request_budget:
                 break
+            if _is_insider_form(form):
+                continue
             filing_date = filing_dates[idx] if idx < len(filing_dates) else None
             if filing_date and filing_date < cutoff:
                 continue
@@ -194,22 +230,6 @@ class EdgarIngestionService:
                             "active": 1,
                         }
                     )
-                if self.request_delay_seconds > 0:
-                    time.sleep(self.request_delay_seconds)
-                continue
-
-            if form in {"3", "3/A", "4", "4/A", "5", "5/A"} and primary_document:
-                url = self._document_url(cik, accession, primary_document)
-                try:
-                    xml_text = self.sec_client.get_text(url)
-                    requests_made += 1
-                    filings_checked += 1
-                except Exception:
-                    continue
-                if form.startswith("3"):
-                    holdings.extend(parse_form3_initial_holdings(xml_text, filing_date, accession))
-                elif form.startswith("4"):
-                    holdings.extend(parse_form4_post_holdings(xml_text, filing_date, accession))
                 if self.request_delay_seconds > 0:
                     time.sleep(self.request_delay_seconds)
 

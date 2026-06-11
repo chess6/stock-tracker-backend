@@ -38,12 +38,22 @@ def test_is_nt_form():
 
 def test_aggregate_insider_ownership_pct():
     holdings = [
-        {"owner_name": "Alice", "shares_held": 1000.0, "security_title": "Common Stock"},
-        {"owner_name": "Bob", "shares_held": 500.0, "security_title": "Common Stock"},
+        {"owner_name": "Alice", "shares_held": 1000.0, "security_title": "Common Stock", "filing_date": "2024-01-01", "accession": "a1"},
+        {"owner_name": "Bob", "shares_held": 500.0, "security_title": "Common Stock", "filing_date": "2024-01-01", "accession": "a2"},
     ]
     agg = aggregate_insider_ownership_pct(holdings, 10000.0)
-    assert agg["ownership_pct"] == 0.15
+    assert agg["ownership_pct"] == 15.0
     assert agg["shares_held"] == 1500.0
+
+
+def test_aggregate_insider_ownership_uses_latest_filing_per_owner():
+    holdings = [
+        {"owner_name": "Alice", "shares_held": 1000.0, "security_title": "Common Stock", "filing_date": "2024-01-01", "accession": "a1"},
+        {"owner_name": "Alice", "shares_held": 2500.0, "security_title": "Common Stock", "filing_date": "2024-06-01", "accession": "a2"},
+    ]
+    agg = aggregate_insider_ownership_pct(holdings, 10000.0)
+    assert agg["shares_held"] == 2500.0
+    assert agg["ownership_pct"] == 25.0
 
 
 def test_edgar_events_upsert_idempotent(tmp_path):
@@ -147,6 +157,23 @@ def test_parse_short_interest_file():
     assert len(rows) == 1
     assert rows[0]["ticker"] == "AAPL"
     assert rows[0]["short_interest_shares"] == 50000000.0
+
+
+def test_short_interest_pct_from_shares_outstanding(tmp_path):
+    from app.services.finra_short_interest import FinraShortInterestService
+
+    db_path = tmp_path / "short.sqlite3"
+    init_db(str(db_path))
+    conn = connect_db(str(db_path))
+    try:
+        repo = Repository(conn)
+        service = FinraShortInterestService(repo)
+        service._latest_shares_outstanding = lambda _ticker: 15_000_000_000.0
+        pct = service._short_interest_pct("AAPL", 50_000_000.0)
+        assert pct is not None
+        assert abs(pct - (50_000_000.0 / 15_000_000_000.0 * 100.0)) < 0.001
+    finally:
+        conn.close()
 
 
 def test_company_market_data_upsert_idempotent(tmp_path):

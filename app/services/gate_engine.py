@@ -25,6 +25,7 @@ from .metric_primitives import (
     GATE_SURVIVABILITY_STRONG,
     SLOAN_ACCRUALS_HIGH_THRESHOLD,
     TIME_CHEAP_STRUCTURAL_YEARS,
+    debt_maturity_near_term_wall,
     free_cash_flow,
     interest_coverage,
     safe_div,
@@ -97,14 +98,36 @@ def _fcf_yield(row: dict, price: float | None) -> float | None:
     return _owner_earnings_yield(row, price)
 
 
-def _edgar_trigger_state(flags: list[dict], events: list[dict]) -> dict[str, Any]:
-    going_concern = any(item.get("flag_type") == "going_concern" for item in flags)
-    nt_filing = any(item.get("flag_type") == "nt_filing" for item in flags)
-    restatement = any(item.get("item_number") == "4.02" for item in events)
+def _within_days_as_of(filed_date: str | None, *, as_of: date, days: int) -> bool:
+    parsed = _parse_date(filed_date)
+    if parsed is None:
+        return False
+    return parsed >= as_of - timedelta(days=days) and parsed <= as_of
+
+
+def edgar_trigger_state_as_of(
+    flags: list[dict],
+    events: list[dict],
+    as_of: date,
+) -> dict[str, Any]:
+    """Evaluate EDGAR trigger flags using only filings on or before as_of."""
+    eligible_flags = [
+        item
+        for item in flags
+        if (parsed := _parse_date(item.get("filed_date"))) is not None and parsed <= as_of
+    ]
+    eligible_events = [
+        item
+        for item in events
+        if (parsed := _parse_date(item.get("filed_date"))) is not None and parsed <= as_of
+    ]
+    going_concern = any(item.get("flag_type") == "going_concern" for item in eligible_flags)
+    nt_filing = any(item.get("flag_type") == "nt_filing" for item in eligible_flags)
+    restatement = any(item.get("item_number") == "4.02" for item in eligible_events)
     auditor_change_12m = any(
         item.get("item_number") == "4.01"
-        and _within_days(item.get("filed_date"), days=GATE_AUDITOR_CHANGE_LOOKBACK_DAYS)
-        for item in events
+        and _within_days_as_of(item.get("filed_date"), as_of=as_of, days=GATE_AUDITOR_CHANGE_LOOKBACK_DAYS)
+        for item in eligible_events
     )
     return {
         "going_concern": going_concern,
@@ -112,6 +135,10 @@ def _edgar_trigger_state(flags: list[dict], events: list[dict]) -> dict[str, Any
         "restatement": restatement,
         "auditor_change_12m": auditor_change_12m,
     }
+
+
+def _edgar_trigger_state(flags: list[dict], events: list[dict]) -> dict[str, Any]:
+    return edgar_trigger_state_as_of(flags, events, date.today())
 
 
 def _quarterly_operational_recovery(repo: Repository, ticker: str) -> dict[str, Any]:
@@ -218,6 +245,8 @@ def assemble_gate_inputs(
     events = repo.fetch_company_edgar_events(symbol, limit=50)
     edgar_triggers = _edgar_trigger_state(flags, events)
     operational = _quarterly_operational_recovery(repo, symbol)
+    debt_schedule = repo.fetch_company_debt_maturities(symbol)
+    debt_maturity_near_term = debt_maturity_near_term_wall(debt_schedule)
 
     fcf = free_cash_flow(row)
     fcf_yield = _fcf_yield(row, price)
@@ -253,6 +282,7 @@ def assemble_gate_inputs(
             "fcf_positive_streak": fcf_positive_streak,
             "interest_coverage": metrics.get("interest_coverage") or interest_coverage(row),
         },
+        "debt_maturity_near_term": debt_maturity_near_term,
     }
 
 
@@ -267,7 +297,7 @@ def evaluate_solvency_runway(inputs: dict[str, Any]) -> dict[str, Any]:
     runway_months = latent.get("runway_months")
     coverage = derived.get("interest_coverage")
     fcf = derived.get("fcf")
-    debt_maturity_near_term = None  # Phase 4/B3 — unavailable until ingested
+    debt_maturity_near_term = inputs.get("debt_maturity_near_term")
 
     evidence = {
         "survivability": survivability,
@@ -595,7 +625,7 @@ def evaluate_margin_of_safety(inputs: dict[str, Any]) -> dict[str, Any]:
         "grossMargin3yrDelta": margin_trends.get("gross_margin_3yr_delta"),
     }
 
-    nav_discount = price_to_nav is not None and price_to_nav < 1.0
+    nav_discount = price_to_nav is not None and 0 < price_to_nav < 1.0
     owner_yield_pass = owner_yield is not None and owner_yield >= GATE_OWNER_EARNINGS_YIELD_PASS
     fcf_yield_pass = (
         fcf_yield is not None
@@ -668,12 +698,16 @@ def summarize_gate_stack(gates: list[dict[str, Any]]) -> dict[str, Any]:
     failed = [item["gate"] for item in gates if item.get("status") == "fail"]
     unknown = [item["gate"] for item in gates if item.get("status") == "unknown"]
     passed = [item["gate"] for item in gates if item.get("status") == "pass"]
+    no_hard_fails = len(failed) == 0
+    fully_evaluated = len(unknown) == 0
     return {
         "passedGates": passed,
         "failedGates": failed,
         "unknownGates": unknown,
-        "allPassed": len(failed) == 0,
-        "investable": len(failed) == 0,
+        "allPassed": no_hard_fails and fully_evaluated,
+        "noHardFails": no_hard_fails,
+        "fullyEvaluated": fully_evaluated,
+        "investable": no_hard_fails,
         "skipPillars": len(failed) > 0,
     }
 
@@ -709,6 +743,8 @@ def gates_to_api(payload: dict[str, Any]) -> dict[str, Any]:
             "failedGates": summary.get("failedGates") or [],
             "unknownGates": summary.get("unknownGates") or [],
             "allPassed": bool(summary.get("allPassed")),
+            "noHardFails": bool(summary.get("noHardFails")),
+            "fullyEvaluated": bool(summary.get("fullyEvaluated")),
             "investable": bool(summary.get("investable")),
             "skipPillars": bool(summary.get("skipPillars")),
         },

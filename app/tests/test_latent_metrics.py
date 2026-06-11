@@ -48,7 +48,32 @@ def test_conservative_nav_haircuts():
     assert nav == expected_assets - 600
     nav_ps = conservative_nav_per_share(row)
     assert nav_ps == nav / 100.0
-    assert price_to_conservative_nav(50.0, nav_ps) == 50.0 / nav_ps
+    assert price_to_conservative_nav(50.0, nav_ps) is None
+
+    positive_row = _balance_sheet_row(liabilities=200.0)
+    positive_nav_ps = conservative_nav_per_share(positive_row)
+    assert positive_nav_ps is not None and positive_nav_ps > 0
+    assert price_to_conservative_nav(50.0, positive_nav_ps) == 50.0 / positive_nav_ps
+
+
+def test_price_to_conservative_nav_rejects_negative_nav():
+    assert price_to_conservative_nav(100.0, -5.0) is None
+    assert price_to_conservative_nav(100.0, 0.0) is None
+
+
+def test_debt_maturity_near_term_wall_bucket_keys():
+    from app.services.metric_primitives import debt_maturity_near_term_wall
+
+    assert debt_maturity_near_term_wall([]) is None
+    assert debt_maturity_near_term_wall([
+        {"maturity_year": "year_3", "amount": 1_000_000_000.0},
+    ]) is False
+    assert debt_maturity_near_term_wall([
+        {"maturity_year": "year_1", "amount": 12_000_000_000.0},
+    ]) is True
+    assert debt_maturity_near_term_wall([
+        {"maturity_year": "year_2", "amount": 0.0},
+    ]) is False
 
 
 def test_sloan_accruals_with_prior():

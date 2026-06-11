@@ -75,3 +75,45 @@ def test_baserate_route_with_snapshots(app, client):
         payload = response.get_json()
         assert "valueTrapHitRate" in payload
         assert payload["meta"]["source"] == "sqlite"
+
+
+def test_evaluate_gates_from_snapshot_uses_edgar_as_of(app):
+    from app.services.base_rate_validation import _evaluate_gates_from_snapshot_row
+
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "BREDG", "name": "Edgar Base Rate", "cik": "0000000300"}])
+        company = repo.get_company_by_ticker("BREDG")
+        repo.upsert_company_scores(
+            company["id"],
+            [
+                {
+                    "period_end": "2023-12-31",
+                    "dimension": "ARY",
+                    "survivability": 70.0,
+                    "altman_z": 3.0,
+                    "beneish_m": -2.5,
+                    "piotroski_f": 6,
+                },
+            ],
+        )
+        repo.upsert_company_edgar_events(
+            company["id"],
+            [
+                {
+                    "form_type": "8-K",
+                    "item_number": "4.02",
+                    "filed_date": "2024-01-15",
+                    "event_type": "restatement",
+                    "summary": "Restatement",
+                    "accession": "0000000300-24-000001",
+                },
+            ],
+        )
+        before = _evaluate_gates_from_snapshot_row(repo, "BREDG", "2023-12-31")
+        after = _evaluate_gates_from_snapshot_row(repo, "BREDG", "2024-06-01")
+        assert before is not None and after is not None
+        acct_before = next(g for g in before["gates"] if g["gate"] == "accounting_integrity")
+        acct_after = next(g for g in after["gates"] if g["gate"] == "accounting_integrity")
+        assert acct_before["status"] != "fail"
+        assert acct_after["status"] == "fail"

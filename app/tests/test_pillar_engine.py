@@ -124,6 +124,33 @@ def test_pillars_deterministic():
     assert first == second
 
 
+def test_pillar_candidate_handles_xbrl_debt_maturity_buckets():
+    from app.services.pillar_engine import _factor_debt_maturity_risk
+
+    near_term = _factor_debt_maturity_risk(
+        _pillar_candidate(
+            edgar={
+                "debt_maturity_near_term": True,
+            },
+        ),
+        {},
+    )
+    assert near_term is not None
+    assert near_term["raw"]["debtMaturityNearTerm"] is True
+    assert near_term["normalized"] == 0.2
+
+    no_wall = _factor_debt_maturity_risk(
+        _pillar_candidate(
+            edgar={
+                "debt_maturity_near_term": False,
+            },
+        ),
+        {},
+    )
+    assert no_wall is not None
+    assert no_wall["normalized"] == 0.8
+
+
 def test_research_pillars_route_shape(app, client):
     from app.db import get_db
     from app.repositories import Repository
@@ -171,3 +198,37 @@ def test_evaluate_pillars_for_ticker_not_found(app):
         repo = Repository(get_db())
         result = evaluate_pillars_for_ticker(repo, "ZZZZZ", prices_service=PricesService(repo))
         assert result is None
+
+
+def test_evaluate_pillars_reuses_provided_gate_inputs(app, monkeypatch):
+    from app.db import get_db
+    from app.repositories import Repository
+    from app.services import pillar_engine
+    from app.services.prices import PricesService
+    from app.tests.test_gate_engine import _base_inputs
+
+    calls = {"count": 0}
+    original = pillar_engine.assemble_gate_inputs
+
+    def counting_assemble(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pillar_engine, "assemble_gate_inputs", counting_assemble)
+
+    with app.app_context():
+        repo = Repository(get_db())
+        gate_inputs = _base_inputs()
+        gate_payload = {
+            "ticker": "TEST",
+            "gates": [],
+            "summary": {"skipPillars": True, "failedGates": ["solvency_runway"]},
+        }
+        evaluate_pillars_for_ticker(
+            repo,
+            "TEST",
+            prices_service=PricesService(repo),
+            gate_payload=gate_payload,
+            gate_inputs=gate_inputs,
+        )
+        assert calls["count"] == 0

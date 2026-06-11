@@ -118,6 +118,116 @@ SEED_TICKER_SPECS: list[dict[str, Any]] = [
 
 DEFAULT_REL_TOLERANCE = 0.01
 
+# Thesis engine gate/pillar expectations (Session 4 / R5).
+# Validated against local SQLite after R0–R4 remediation (2026-06-10).
+THESIS_GATE_SPECS: list[dict[str, Any]] = [
+    {
+        "ticker": "AAPL",
+        "profile": "healthy_compounder",
+        "gates": {
+            "skipPillars": False,
+            "noHardFails": True,
+            "solvency_not_fail": True,
+            "margin_of_safety_not_pass": True,
+        },
+    },
+    {
+        "ticker": "MSFT",
+        "profile": "large_compounder",
+        "gates": {
+            "skipPillars": False,
+            "noHardFails": True,
+            "solvency_not_fail": True,
+        },
+    },
+    {
+        "ticker": "GME",
+        "profile": "volatile_turnaround",
+        "gates": {
+            "skipPillars": True,
+            "solvency_fail": True,
+        },
+        "thesis": {
+            "disqualified": True,
+            "bullCaseEmpty": True,
+        },
+    },
+    {
+        "ticker": "AMC",
+        "profile": "distressed_small_cap",
+        "gates": {
+            "skipPillars": True,
+            "solvency_fail": True,
+        },
+        "thesis": {
+            "disqualified": True,
+            "bullCaseEmpty": True,
+            "bearCaseEmpty": True,
+        },
+    },
+]
+
+
+def gate_status(gates: list[dict[str, Any]], gate_name: str) -> str | None:
+    for gate in gates:
+        if gate.get("gate") == gate_name:
+            return gate.get("status")
+    return None
+
+
+def thesis_expectations_met(
+    *,
+    gate_payload: dict[str, Any],
+    thesis_payload: dict[str, Any] | None,
+    spec: dict[str, Any],
+) -> list[str]:
+    """Return human-readable failures when live payload diverges from spec."""
+    failures: list[str] = []
+    summary = gate_payload.get("summary") or {}
+    gates = gate_payload.get("gates") or []
+    gate_rules = spec.get("gates") or {}
+
+    for key, expected in gate_rules.items():
+        if key == "skipPillars":
+            actual = bool(summary.get("skipPillars"))
+        elif key == "noHardFails":
+            actual = bool(summary.get("noHardFails"))
+        elif key == "solvency_fail":
+            actual = gate_status(gates, "solvency_runway") == "fail"
+            expected = True
+        elif key == "solvency_not_fail":
+            actual = gate_status(gates, "solvency_runway") != "fail"
+            expected = True
+        elif key == "margin_of_safety_not_pass":
+            actual = gate_status(gates, "margin_of_safety") != "pass"
+            expected = True
+        else:
+            continue
+        if actual is not expected:
+            failures.append(f"{spec['ticker']} gates.{key}: expected {expected}, got {actual}")
+
+    thesis_rules = spec.get("thesis") or {}
+    if thesis_rules and thesis_payload is None:
+        failures.append(f"{spec['ticker']} thesis: expected payload, got None")
+        return failures
+
+    sections = (thesis_payload or {}).get("sections") or {}
+    for key, expected in thesis_rules.items():
+        if key == "disqualified":
+            actual = bool((thesis_payload or {}).get("disqualified"))
+        elif key == "bullCaseEmpty":
+            actual = len(sections.get("bullCase") or []) == 0
+            expected = True
+        elif key == "bearCaseEmpty":
+            actual = len(sections.get("bearCase") or []) == 0
+            expected = True
+        else:
+            continue
+        if actual is not expected:
+            failures.append(f"{spec['ticker']} thesis.{key}: expected {expected}, got {actual}")
+
+    return failures
+
 
 def score_within_range(value: float | int | None, spec: dict[str, Any]) -> bool:
     if value is None:

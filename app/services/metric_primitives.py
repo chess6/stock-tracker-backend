@@ -229,10 +229,31 @@ def conservative_nav_per_share(row: dict) -> float | None:
 
 
 def price_to_conservative_nav(price: float | None, nav_per_share: float | None) -> float | None:
-    """Price / conservative NAV per share; values below 1.0 indicate discount to haircut NAV."""
-    if price in (None, 0) or nav_per_share in (None, 0):
+    """Price / conservative NAV per share; values in (0, 1) indicate discount to haircut NAV."""
+    if price in (None, 0) or nav_per_share in (None, 0) or nav_per_share < 0:
         return None
     return price / nav_per_share
+
+
+NEAR_TERM_DEBT_MATURITY_BUCKETS = frozenset({"year_1", "year_2"})
+
+
+def debt_maturity_near_term_wall(
+    schedule: list[dict] | None,
+    *,
+    min_amount: float = 0.0,
+) -> bool | None:
+    """True when material debt matures within two annual buckets (XBRL year_1 / year_2 tags)."""
+    if not schedule:
+        return None
+    for row in schedule:
+        bucket = row.get("maturity_year")
+        amount = row.get("amount")
+        if bucket not in NEAR_TERM_DEBT_MATURITY_BUCKETS:
+            continue
+        if amount is not None and float(amount) > min_amount:
+            return True
+    return False
 
 
 def sloan_accruals(row: dict, prior_row: dict | None = None) -> float | None:

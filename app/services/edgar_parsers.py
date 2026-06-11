@@ -97,8 +97,15 @@ def _float(value: str | None) -> float | None:
         return None
 
 
+def _form4_post_shares(node: ET.Element) -> float | None:
+    shares = _float(_text(node, ".//{*}postTransactionAmounts/{*}sharesOwnedFollowingTransaction/{*}value"))
+    if shares is None:
+        shares = _float(_text(node, ".//{*}sharesOwnedFollowingTransaction/{*}value"))
+    return shares
+
+
 def parse_form4_post_holdings(xml_text: str, filing_date: str, accession: str) -> list[dict]:
-    """Extract post-transaction share holdings from Form 4 non-derivative table."""
+    """Extract post-transaction share holdings from Form 4 non-derivative tables."""
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
@@ -107,11 +114,10 @@ def parse_form4_post_holdings(xml_text: str, filing_date: str, accession: str) -
     owner_name = _text(root, ".//{*}reportingOwner/{*}reportingOwnerId/{*}rptOwnerName")
     records: list[dict] = []
     for node in root.iter():
-        if _local(node.tag) != "nonDerivativeHolding":
+        tag = _local(node.tag)
+        if tag not in {"nonDerivativeHolding", "nonDerivativeTransaction"}:
             continue
-        shares = _float(_text(node, ".//{*}postTransactionAmounts/{*}sharesOwnedFollowingTransaction/{*}value"))
-        if shares is None:
-            shares = _float(_text(node, ".//{*}sharesOwnedFollowingTransaction/{*}value"))
+        shares = _form4_post_shares(node)
         title = _text(node, ".//{*}securityTitle/{*}value")
         if shares is None:
             continue
@@ -161,24 +167,43 @@ def parse_form3_initial_holdings(xml_text: str, filing_date: str, accession: str
     return records
 
 
+def _is_common_equity_title(title: str | None) -> bool:
+    normalized = (title or "").lower().strip()
+    if not normalized:
+        return True
+    if "preferred" in normalized or "option" in normalized or "warrant" in normalized:
+        return False
+    return "common" in normalized or "ordinary" in normalized or "class a" in normalized
+
+
 def aggregate_insider_ownership_pct(
     holdings: list[dict],
     shares_outstanding: float | None,
 ) -> dict[str, float | None]:
-    """Sum insider holdings (common stock only) as % of shares outstanding."""
+    """Sum latest insider common-stock holdings as percent of shares outstanding (0–100)."""
     if shares_outstanding in (None, 0):
         return {"ownership_pct": None, "shares_held": None, "shares_outstanding": shares_outstanding}
-    by_owner: dict[str, float] = {}
+
+    per_filing: dict[tuple[str, str, str], float] = {}
     for row in holdings:
-        title = (row.get("security_title") or "").lower()
-        if title and "common" not in title and "ordinary" not in title and title.strip():
-            if "preferred" in title or "option" in title or "warrant" in title:
-                continue
+        if not _is_common_equity_title(row.get("security_title")):
+            continue
         owner = row.get("owner_name") or "unknown"
-        by_owner[owner] = max(by_owner.get(owner, 0.0), float(row.get("shares_held") or 0.0))
-    total = sum(by_owner.values())
+        filing_date = row.get("filing_date") or ""
+        accession = row.get("accession") or ""
+        key = (owner, filing_date, accession)
+        per_filing[key] = per_filing.get(key, 0.0) + float(row.get("shares_held") or 0.0)
+
+    latest_by_owner: dict[str, tuple[str, float]] = {}
+    for (owner, filing_date, _accession), shares in per_filing.items():
+        prior = latest_by_owner.get(owner)
+        if prior is None or filing_date > prior[0]:
+            latest_by_owner[owner] = (filing_date, shares)
+
+    total = sum(shares for _, shares in latest_by_owner.values())
+    ownership_fraction = total / shares_outstanding if total else 0.0
     return {
-        "ownership_pct": total / shares_outstanding if total else 0.0,
+        "ownership_pct": ownership_fraction * 100.0,
         "shares_held": total,
         "shares_outstanding": shares_outstanding,
     }

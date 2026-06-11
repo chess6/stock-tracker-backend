@@ -51,7 +51,36 @@ def test_disqualified_thesis_suppresses_bull_case():
         pillar_payload=pillar_payload,
     )
     assert thesis["disqualified"] is True
-    assert thesis["sections"]["bullCase"] == []
+    sections = thesis["sections"]
+    assert sections["bullCase"] == []
+    assert sections["bearCase"] == []
+    assert sections["valuationAssessment"] is None
+    assert sections["catalystWatchlist"] == []
+    assert sections["disconfirmingConditions"] == []
+    assert sections["evidenceCoverage"] is None
+    assert thesis["pillars"] == []
+    assert thesis["disqualificationNotice"]["failedGates"]
+
+
+def test_factor_statements_require_traceable_raw():
+    from app.services.thesis_engine import _statement_from_factor
+
+    assert _statement_from_factor(
+        "valuation",
+        {"key": "owner_earnings_yield", "normalized": 0.6, "raw": {}},
+        polarity="bull",
+    ) is None
+    stmt = _statement_from_factor(
+        "valuation",
+        {
+            "key": "owner_earnings_yield",
+            "normalized": 0.6,
+            "raw": {"ownerEarningsYield": 0.11},
+        },
+        polarity="bull",
+    )
+    assert stmt is not None
+    assert stmt["raw"]["ownerEarningsYield"] == 0.11
 
 
 def test_thesis_emits_minimum_two_disconfirming_conditions():
@@ -71,6 +100,11 @@ def test_thesis_emits_minimum_two_disconfirming_conditions():
 
 def test_thesis_evidence_coverage_and_signal_independence():
     gate_inputs, gate_payload, pillar_payload = _thesis_inputs()
+    gate_inputs["staleness"] = {
+        "staleCategories": ["fundamentals", "prices"],
+        "freshnessPenalty": 0.76,
+        "details": {},
+    }
     thesis = build_thesis(
         ticker="TEST",
         gate_payload=gate_payload,
@@ -80,8 +114,46 @@ def test_thesis_evidence_coverage_and_signal_independence():
     coverage = thesis["sections"]["evidenceCoverage"]
     independence = thesis["sections"]["signalIndependence"]
     assert "overall" in coverage
+    assert "rawOverall" in coverage
+    assert coverage["overall"] <= coverage["rawOverall"]
+    assert coverage["staleness"]["freshnessPenalty"] == 0.76
     assert "orthogonalClassCount" in independence
     assert "confidence" not in str(independence).lower()
+
+
+def test_short_interest_appends_unscored_bear_statement():
+    gate_inputs, gate_payload, pillar_payload = _thesis_inputs()
+    gate_inputs["market"] = {
+        "short_interest_pct": 12.5,
+        "short_interest_as_of": "2026-06-10",
+        "short_interest_source": "yfinance_short_interest",
+    }
+    thesis = build_thesis(
+        ticker="TEST",
+        gate_payload=gate_payload,
+        gate_inputs=gate_inputs,
+        pillar_payload=pillar_payload,
+    )
+    bear = thesis["sections"]["bearCase"]
+    short_rows = [item for item in bear if item.get("factorKey") == "short_interest_pct"]
+    assert len(short_rows) == 1
+    assert short_rows[0]["scored"] is False
+    assert short_rows[0]["raw"]["shortInterestPct"] == 12.5
+
+
+def test_staleness_assessment_flags_old_inputs(app):
+    from app.db import get_db
+    from app.repositories import Repository
+    from app.services.thesis_engine import assess_data_staleness
+    from app.tests.test_gate_engine import _base_inputs
+
+    with app.app_context():
+        repo = Repository(get_db())
+        gate_inputs = _base_inputs()
+        gate_inputs["row"] = {"filingdate": "2020-01-01"}
+        result = assess_data_staleness(repo, "TEST", gate_inputs)
+        assert "fundamentals" in result["staleCategories"]
+        assert result["freshnessPenalty"] < 1.0
 
 
 def test_bull_case_structured_as_rebuttals():
