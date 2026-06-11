@@ -207,3 +207,197 @@ def test_screen_insider_buy6m_filter(app, client):
     payload = response.get_json()
     assert payload["meta"]["matched"] == 1
     assert payload["results"][0]["insider"]["buy6m"] >= 100000
+
+
+def _seed_minimal_ticker(repo: Repository, ticker: str, *, buy6m: float = 0, cluster_count: int = 0) -> dict:
+    repo.upsert_companies([{"ticker": ticker, "name": f"{ticker} Co", "cik": f"000000{ticker[-4:]}"}])
+    company = repo.get_company_by_ticker(ticker)
+    repo.upsert_fundamentals(
+        [
+            {
+                "company_id": company["id"],
+                "metric": "revenue",
+                "value": 500.0,
+                "unit": "USD",
+                "period_end": "2024-12-31",
+                "period_type": "annual",
+                "dimension": "ARY",
+                "fiscal_year": 2024,
+                "fiscal_quarter": "FY",
+                "filing_date": "2025-01-01",
+                "form": "10-K",
+                "accession": "1",
+                "source": "test",
+                "taxonomy": "us-gaap",
+                "xbrl_concept": "revenue",
+            }
+        ]
+    )
+    if buy6m > 0:
+        from datetime import date, timedelta
+
+        recent = (date.today() - timedelta(days=10)).isoformat()
+        repo.upsert_insider_transactions(
+            company["id"],
+            [
+                {
+                    "accession": f"{ticker}-a1",
+                    "filing_date": recent,
+                    "transaction_date": recent,
+                    "owner_name": "CEO",
+                    "owner_title": "CEO",
+                    "transaction_code": "P",
+                    "transaction_value": buy6m,
+                    "shares": 1000,
+                    "price_per_share": buy6m / 1000,
+                    "security_title": "Common",
+                }
+            ],
+        )
+    if cluster_count > 0:
+        from datetime import date, timedelta
+
+        today = date.today()
+        window_end = today.isoformat()
+        records = []
+        for i in range(cluster_count):
+            window_start = (today - timedelta(days=29 + i)).isoformat()
+            records.append(
+                {
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "buy_count": 2,
+                    "sell_count": 0,
+                    "unique_buyers": 2,
+                    "total_buy_value": 50000.0,
+                    "total_sell_value": 0.0,
+                    "avg_buy_price": 100.0,
+                    "intensity_score": 0.5,
+                }
+            )
+        repo.upsert_insider_cluster_analysis(company["id"], records)
+    return company
+
+
+def test_screen_or_filter_group_matches_any(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_minimal_ticker(repo, "OR1", buy6m=600000, cluster_count=0)
+        _seed_minimal_ticker(repo, "OR2", buy6m=0, cluster_count=4)
+        _seed_minimal_ticker(repo, "OR3", buy6m=1000, cluster_count=0)
+
+    response = client.post(
+        "/api/research/screen",
+        json={
+            "tickers": ["OR1", "OR2", "OR3"],
+            "filter_groups": [
+                {
+                    "op": "OR",
+                    "filters": [
+                        {"metric": "buy6m", "op": "gte", "value": 500000},
+                        {"metric": "cluster_count", "op": "gte", "value": 3},
+                    ],
+                }
+            ],
+            "limit": 10,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    matched_tickers = {row["ticker"] for row in payload["results"]}
+    assert matched_tickers == {"OR1", "OR2"}
+    assert "OR3" not in matched_tickers
+
+
+def test_screen_and_or_filter_groups_combined(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        company = _seed_aapl_fundamentals(repo)
+        _seed_minimal_ticker(repo, "OR1", buy6m=600000, cluster_count=0)
+        from datetime import date, timedelta
+
+        today = date.today()
+        repo.upsert_insider_cluster_analysis(
+            company["id"],
+            [
+                {
+                    "window_start": (today - timedelta(days=29 + i)).isoformat(),
+                    "window_end": today.isoformat(),
+                    "buy_count": 2,
+                    "sell_count": 0,
+                    "unique_buyers": 2,
+                    "total_buy_value": 75000.0,
+                    "total_sell_value": 0.0,
+                    "avg_buy_price": 100.0,
+                    "intensity_score": 0.6,
+                }
+                for i in range(3)
+            ],
+        )
+
+    response = client.post(
+        "/api/research/screen",
+        json={
+            "tickers": ["AAPL", "OR1"],
+            "filter_groups": [
+                {"op": "AND", "filters": [{"metric": "survivability", "op": "gte", "value": 50}]},
+                {
+                    "op": "OR",
+                    "filters": [
+                        {"metric": "buy6m", "op": "gte", "value": 500000},
+                        {"metric": "cluster_count", "op": "gte", "value": 3},
+                    ],
+                },
+            ],
+            "limit": 10,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    matched_tickers = {row["ticker"] for row in payload["results"]}
+    assert matched_tickers == {"AAPL"}
+
+
+def test_screen_flat_filters_backward_compatible_as_and_group(app, client):
+    with app.app_context():
+        _seed_aapl_fundamentals(Repository(get_db()))
+
+    response = client.post(
+        "/api/research/screen",
+        json={
+            "tickers": ["AAPL"],
+            "filters": [
+                {"metric": "survivability", "op": "gte", "value": 50},
+                {"metric": "pb", "op": "lt", "value": 20},
+            ],
+            "limit": 10,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["spec"]["filter_groups"] == [
+        {
+            "op": "AND",
+            "filters": [
+                {"metric": "survivability", "op": "gte", "value": 50},
+                {"metric": "pb", "op": "lt", "value": 20},
+            ],
+        }
+    ]
+    assert payload["meta"]["matched"] >= 1
+
+
+def test_screen_rejects_invalid_filter_group_op(app):
+    with app.app_context():
+        repo = Repository(get_db())
+        payload, status, error = run_composable_screen(
+            repo,
+            PricesService(repo),
+            {
+                "tickers": ["AAPL"],
+                "filter_groups": [{"op": "XOR", "filters": []}],
+            },
+        )
+        assert status == 400
+        assert "filter_groups[0].op" in error
+        assert payload is None

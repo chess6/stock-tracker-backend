@@ -24,6 +24,7 @@ from .ticker_universes import get_universe_tickers
 logger = logging.getLogger("stock_tracker.screening")
 
 VALID_OPS = frozenset({"lt", "lte", "gt", "gte", "eq", "in", "percentile_lt", "percentile_gt"})
+VALID_GROUP_OPS = frozenset({"AND", "OR"})
 MAX_FILTERS = 20
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 100
@@ -54,6 +55,23 @@ def _finite(value: float | None) -> bool:
     return value is not None and value == value and abs(value) != float("inf")
 
 
+def _normalize_filter(raw: dict, path: str) -> tuple[dict | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, f"{path} must be an object"
+    metric = str(raw.get("metric") or raw.get("field") or "").strip()
+    op = str(raw.get("op") or "").strip().lower()
+    if not metric:
+        return None, f"{path}.metric is required"
+    if op not in VALID_OPS:
+        return None, f"{path}.op must be one of: {', '.join(sorted(VALID_OPS))}"
+    if "value" not in raw:
+        return None, f"{path}.value is required"
+    if op == "in":
+        if not isinstance(raw["value"], list) or not raw["value"]:
+            return None, f"{path}.value must be a non-empty array for op=in"
+    return {"metric": metric, "op": op, "value": raw["value"]}, None
+
+
 def _validate_spec(spec: dict) -> tuple[dict | None, str | None]:
     if not isinstance(spec, dict):
         return None, "Request body must be a JSON object"
@@ -61,25 +79,46 @@ def _validate_spec(spec: dict) -> tuple[dict | None, str | None]:
     filters = spec.get("filters") or []
     if not isinstance(filters, list):
         return None, "filters must be an array"
-    if len(filters) > MAX_FILTERS:
-        return None, f"Maximum {MAX_FILTERS} filters per request"
+
+    filter_groups_raw = spec.get("filter_groups")
+    if filter_groups_raw is not None and not isinstance(filter_groups_raw, list):
+        return None, "filter_groups must be an array"
+
+    normalized_groups: list[dict] = []
+    total_filters = 0
+
+    if filter_groups_raw:
+        for g_idx, group in enumerate(filter_groups_raw):
+            if not isinstance(group, dict):
+                return None, f"filter_groups[{g_idx}] must be an object"
+            group_op = str(group.get("op") or "AND").strip().upper()
+            if group_op not in VALID_GROUP_OPS:
+                return None, f"filter_groups[{g_idx}].op must be AND or OR"
+            group_filters_raw = group.get("filters") or []
+            if not isinstance(group_filters_raw, list):
+                return None, f"filter_groups[{g_idx}].filters must be an array"
+            group_filters: list[dict] = []
+            for f_idx, raw in enumerate(group_filters_raw):
+                normalized, err = _normalize_filter(raw, f"filter_groups[{g_idx}].filters[{f_idx}]")
+                if err:
+                    return None, err
+                group_filters.append(normalized)
+            normalized_groups.append({"op": group_op, "filters": group_filters})
+            total_filters += len(group_filters)
 
     normalized_filters: list[dict] = []
     for idx, raw in enumerate(filters):
-        if not isinstance(raw, dict):
-            return None, f"filters[{idx}] must be an object"
-        metric = str(raw.get("metric") or raw.get("field") or "").strip()
-        op = str(raw.get("op") or "").strip().lower()
-        if not metric:
-            return None, f"filters[{idx}].metric is required"
-        if op not in VALID_OPS:
-            return None, f"filters[{idx}].op must be one of: {', '.join(sorted(VALID_OPS))}"
-        if "value" not in raw:
-            return None, f"filters[{idx}].value is required"
-        if op == "in":
-            if not isinstance(raw["value"], list) or not raw["value"]:
-                return None, f"filters[{idx}].value must be a non-empty array for op=in"
-        normalized_filters.append({"metric": metric, "op": op, "value": raw["value"]})
+        normalized, err = _normalize_filter(raw, f"filters[{idx}]")
+        if err:
+            return None, err
+        normalized_filters.append(normalized)
+    total_filters += len(normalized_filters)
+
+    if normalized_filters:
+        normalized_groups.append({"op": "AND", "filters": normalized_filters})
+
+    if total_filters > MAX_FILTERS:
+        return None, f"Maximum {MAX_FILTERS} filters per request"
 
     tickers = spec.get("tickers")
     universe = (spec.get("universe") or "").strip().lower() or None
@@ -108,8 +147,11 @@ def _validate_spec(spec: dict) -> tuple[dict | None, str | None]:
     if limit < 1 or limit > MAX_LIMIT:
         return None, f"limit must be between 1 and {MAX_LIMIT}"
 
+    flat_filters = [flt for group in normalized_groups for flt in group["filters"]]
+
     return {
-        "filters": normalized_filters,
+        "filters": flat_filters,
+        "filter_groups": normalized_groups,
         "tickers": tickers,
         "universe": universe,
         "sort": {"metric": sort_metric, "dir": sort_dir} if sort_metric else None,
@@ -275,6 +317,14 @@ def _evaluate_filter(
     }
 
 
+def _group_passed(evidence: list[dict], group_op: str) -> bool:
+    if not evidence:
+        return True
+    if group_op == "OR":
+        return any(item["passed"] for item in evidence)
+    return all(item["passed"] for item in evidence)
+
+
 def _build_candidates(
     repo: Repository,
     prices_service: PricesService,
@@ -377,21 +427,32 @@ def run_composable_screen(
             "results": [],
         }, 200, None
 
+    filter_groups = normalized["filter_groups"]
+    all_filters = normalized["filters"]
+
     metric_api_keys = []
-    for flt in normalized["filters"]:
+    for flt in all_filters:
         kind, resolved = _field_kind(flt["metric"])
         if kind == "metric":
             metric_api_keys.append(resolved)
     sector_stats = (
         sector_stats_for_tickers(repo, list(candidates.keys()), metric_api_keys=metric_api_keys or None)
-        if any(f["op"] in {"percentile_lt", "percentile_gt"} for f in normalized["filters"])
+        if any(f["op"] in {"percentile_lt", "percentile_gt"} for f in all_filters)
         else {"bySector": {}}
     )
 
     matched: list[dict] = []
     for ticker, candidate in candidates.items():
-        evidence = [_evaluate_filter(candidate, flt, sector_stats=sector_stats) for flt in normalized["filters"]]
-        if normalized["filters"] and not all(item["passed"] for item in evidence):
+        evidence: list[dict] = []
+        groups_passed = True
+        for group in filter_groups:
+            group_evidence = [
+                _evaluate_filter(candidate, flt, sector_stats=sector_stats) for flt in group["filters"]
+            ]
+            evidence.extend(group_evidence)
+            if group["filters"] and not _group_passed(group_evidence, group["op"]):
+                groups_passed = False
+        if filter_groups and not groups_passed:
             continue
         matched.append(
             {
