@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.services.article_dedup import compute_simhash
 from app.services.article_enrichment import infer_topic_cluster, simple_sentiment, simhash_fingerprint
 
 
@@ -15,3 +16,7 @@ def test_infer_topic_cluster_semis():
 
 def test_simhash_fingerprint_stable():
     assert simhash_fingerprint("alpha beta gamma") == simhash_fingerprint("alpha beta gamma")
+
+
+def test_simhash_fingerprint_matches_dedup():
+    assert simhash_fingerprint("alpha beta gamma") == compute_simhash("alpha beta gamma", None)

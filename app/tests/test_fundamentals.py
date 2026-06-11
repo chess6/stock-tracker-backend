@@ -301,7 +301,12 @@ def test_get_financials_most_recent_prefers_annual_rows():
         def fetch_prices(self, ticker, limit=None):
             return []
 
+        def fetch_prices_by_period_ends(self, ticker, period_ends):
+            return {period_end: None for period_end in period_ends}
+
     payload = FundamentalsService(FakeRepo(), None).get_financials_payload(["JPM"], None, None, True)
+    assert payload["meta"]["source"] == "sqlite"
+    assert payload["meta"]["computedAt"]
     row = payload["raw"]["datatable"]["data"][0]
     cols = [c["name"] for c in payload["raw"]["datatable"]["columns"]]
     wide = dict(zip(cols, row))

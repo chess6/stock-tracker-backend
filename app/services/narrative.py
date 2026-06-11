@@ -356,6 +356,14 @@ def build_narrative_analysis(
         "articleCount": len(articles),
         "narrativeStates": intelligence.get("narrativeStates", []),
         "narrativeDivergence": intelligence.get("narrativeDivergence"),
+        "divergenceHistory": [
+            {
+                "snapshotDate": row.get("snapshot_date"),
+                "divergenceScore": row.get("divergence_score"),
+                "signal": row.get("divergence_signal"),
+            }
+            for row in repo.fetch_narrative_snapshot_history(symbol, limit=24)
+        ],
         "emergingSituations": intelligence.get("emergingSituations", []),
         "newsBursts": intelligence.get("newsBursts", []),
     }

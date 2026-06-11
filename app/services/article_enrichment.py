@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import re
+
+from .article_dedup import compute_simhash
 
 _POSITIVE = frozenset({
     "beat", "beats", "surge", "surges", "rally", "rallies", "gain", "gains", "growth", "record",
@@ -22,22 +23,9 @@ _TOPIC_KEYWORDS = {
 
 
 def simhash_fingerprint(text: str, bits: int = 64) -> str:
-    tokens = re.findall(r"[a-z0-9]{3,}", (text or "").lower())
-    if not tokens:
-        return "0" * 16
-    vector = [0] * bits
-    for token in tokens:
-        digest = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16)
-        for bit in range(bits):
-            if (digest >> bit) & 1:
-                vector[bit] += 1
-            else:
-                vector[bit] -= 1
-    fingerprint = 0
-    for bit, value in enumerate(vector):
-        if value > 0:
-            fingerprint |= 1 << bit
-    return f"{fingerprint:016x}"
+    """Canonical simhash — delegates to article_dedup.compute_simhash."""
+    del bits  # retained for call-site compatibility
+    return compute_simhash(text or "", None)
 
 
 def simple_sentiment(text: str) -> tuple[str | None, float | None]:

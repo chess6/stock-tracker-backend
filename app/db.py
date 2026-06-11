@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from flask import Flask, current_app, g
+
+logger = logging.getLogger("stock_tracker.db")
+
+T = TypeVar("T")
+
+SQLITE_LOCK_ERRORS = frozenset({"database is locked", "database is busy"})
 
 
 SCHEMA = """
@@ -346,6 +356,103 @@ CREATE TABLE IF NOT EXISTS company_narrative_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_narrative_snapshots_ticker_date
     ON company_narrative_snapshots(ticker, snapshot_date DESC);
+
+CREATE TABLE IF NOT EXISTS company_edgar_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    form_type TEXT NOT NULL,
+    item_number TEXT,
+    filed_date TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    summary TEXT,
+    accession TEXT,
+    source TEXT NOT NULL DEFAULT 'sec_edgar',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    UNIQUE (company_id, accession, item_number, event_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_edgar_events_company_date
+    ON company_edgar_events(company_id, filed_date DESC);
+
+CREATE TABLE IF NOT EXISTS company_edgar_flags (
+    company_id INTEGER NOT NULL,
+    flag_type TEXT NOT NULL,
+    filed_date TEXT,
+    accession TEXT,
+    details TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (company_id, flag_type),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS company_insider_ownership (
+    company_id INTEGER NOT NULL,
+    as_of_date TEXT NOT NULL,
+    ownership_pct REAL,
+    shares_held REAL,
+    shares_outstanding REAL,
+    source TEXT NOT NULL DEFAULT 'sec_edgar',
+    computed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (company_id, as_of_date),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS company_activist_filings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL,
+    filed_date TEXT NOT NULL,
+    form_type TEXT NOT NULL,
+    accession TEXT NOT NULL,
+    filer_name TEXT,
+    ownership_pct REAL,
+    summary TEXT,
+    source TEXT NOT NULL DEFAULT 'sec_edgar',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    UNIQUE (company_id, accession)
+);
+
+CREATE INDEX IF NOT EXISTS idx_activist_filings_company_date
+    ON company_activist_filings(company_id, filed_date DESC);
+
+CREATE TABLE IF NOT EXISTS company_debt_maturities (
+    company_id INTEGER NOT NULL,
+    period_end TEXT NOT NULL,
+    maturity_year TEXT NOT NULL,
+    amount REAL,
+    source TEXT NOT NULL DEFAULT 'sec_edgar',
+    computed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (company_id, period_end, maturity_year),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS company_segments (
+    company_id INTEGER NOT NULL,
+    period_end TEXT NOT NULL,
+    segment_name TEXT NOT NULL,
+    revenue REAL,
+    operating_income REAL,
+    margin REAL,
+    source TEXT NOT NULL DEFAULT 'sec_edgar',
+    computed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (company_id, period_end, segment_name),
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS company_market_data (
+    ticker TEXT NOT NULL,
+    as_of_date TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    value REAL,
+    source TEXT NOT NULL,
+    fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (ticker, as_of_date, metric)
+);
+
+CREATE INDEX IF NOT EXISTS idx_company_market_data_ticker_metric
+    ON company_market_data(ticker, metric, as_of_date DESC);
 """
 
 
@@ -361,6 +468,37 @@ def configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=30000;")
     conn.execute("PRAGMA temp_store=MEMORY;")
     return conn
+
+
+def is_sqlite_lock_error(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and str(exc).lower() in SQLITE_LOCK_ERRORS
+
+
+def retry_on_sqlite_lock(
+    fn: Callable[[], T],
+    *,
+    max_attempts: int = 8,
+    base_delay_seconds: float = 0.25,
+    operation: str = "sqlite_write",
+) -> T:
+    """Retry transient SQLite writer contention; re-raises non-lock errors immediately."""
+    delay = base_delay_seconds
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except sqlite3.OperationalError as exc:
+            if not is_sqlite_lock_error(exc) or attempt >= max_attempts:
+                raise
+            logger.warning(
+                "%s lock contention attempt=%s/%s retry_in=%.2fs",
+                operation,
+                attempt,
+                max_attempts,
+                delay,
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, 5.0)
+    raise RuntimeError("retry_on_sqlite_lock exhausted without raising")
 
 
 def connect_db(path: str) -> sqlite3.Connection:
@@ -506,6 +644,10 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE company_scores ADD COLUMN scoring_version INTEGER NOT NULL DEFAULT 1"
         )
+    if "survivability_bucket" not in company_scores_cols:
+        conn.execute("ALTER TABLE company_scores ADD COLUMN survivability_bucket TEXT")
+    if "beneish_components" not in company_scores_cols:
+        conn.execute("ALTER TABLE company_scores ADD COLUMN beneish_components TEXT")
 
     if "enrichment_version" not in article_cols:
         conn.execute(

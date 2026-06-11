@@ -150,3 +150,335 @@ def book_value_per_share(row: dict) -> float | None:
     if assets is not None and liabilities is not None:
         return (assets - liabilities) / shares
     return None
+
+
+# Conservative NAV haircuts (Phase 0 — thesis engine latent layer)
+RECEIVABLES_HAIRCUT = 0.80
+INVENTORY_HAIRCUT = 0.50
+PPNE_HAIRCUT = 0.375  # midpoint of 25–50% liquidation range
+
+# Sloan accruals: earnings quality threshold (Gate 2 supporting)
+SLOAN_ACCRUALS_HIGH_THRESHOLD = 0.10
+
+# Time-cheap: structural impairment probable at 5+ years of cheapness
+TIME_CHEAP_STRUCTURAL_YEARS = 5
+
+# Gate stack thresholds (Phase 1 — non-compensatory investability screen)
+GATE_RUNWAY_PASS_MONTHS = 18.0
+GATE_INTEREST_COVERAGE_PASS = 2.0
+GATE_INTEREST_COVERAGE_FAIL = 1.0
+GATE_SURVIVABILITY_STRONG = 80.0
+BENEISH_MANIPULATION_THRESHOLD = -1.78
+GATE_FCF_YIELD_PASS = 0.08
+GATE_OWNER_EARNINGS_YIELD_PASS = 0.10
+GATE_AUDITOR_CHANGE_LOOKBACK_DAYS = 365
+
+
+def conservative_nav_components(row: dict) -> dict[str, float | None]:
+    """Haircut asset components for liquidation-style NAV."""
+    cash = row.get("cashneq") or 0.0
+    receivables = (row.get("receivables") or 0.0) * RECEIVABLES_HAIRCUT
+    inventory = (row.get("inventory") or 0.0) * INVENTORY_HAIRCUT
+    ppne = (row.get("ppnenet") or 0.0) * PPNE_HAIRCUT
+    other_current = row.get("assetscurrent")
+    if other_current is not None:
+        other_current = max(
+            0.0,
+            other_current
+            - (row.get("cashneq") or 0.0)
+            - (row.get("receivables") or 0.0)
+            - (row.get("inventory") or 0.0),
+        )
+    else:
+        other_current = 0.0
+    liabilities = row.get("liabilities")
+    return {
+        "cash": cash,
+        "receivables_haircut": receivables,
+        "inventory_haircut": inventory,
+        "ppne_haircut": ppne,
+        "other_current": other_current,
+        "goodwill_written_off": row.get("goodwill") or 0.0,
+        "intangibles_written_off": row.get("intangibles") or 0.0,
+        "liabilities": liabilities,
+    }
+
+
+def conservative_nav_total(row: dict) -> float | None:
+    """Net asset value with conservative asset haircuts; goodwill/intangibles excluded."""
+    components = conservative_nav_components(row)
+    liabilities = components.get("liabilities")
+    if liabilities is None:
+        return None
+    asset_sum = (
+        (components["cash"] or 0.0)
+        + (components["receivables_haircut"] or 0.0)
+        + (components["inventory_haircut"] or 0.0)
+        + (components["ppne_haircut"] or 0.0)
+        + (components["other_current"] or 0.0)
+    )
+    return asset_sum - liabilities
+
+
+def conservative_nav_per_share(row: dict) -> float | None:
+    nav = conservative_nav_total(row)
+    shares = row.get("sharesbas")
+    if nav is None or shares in (None, 0):
+        return None
+    return nav / shares
+
+
+def price_to_conservative_nav(price: float | None, nav_per_share: float | None) -> float | None:
+    """Price / conservative NAV per share; values below 1.0 indicate discount to haircut NAV."""
+    if price in (None, 0) or nav_per_share in (None, 0):
+        return None
+    return price / nav_per_share
+
+
+def sloan_accruals(row: dict, prior_row: dict | None = None) -> float | None:
+    """(Net income − operating cash flow) / average total assets."""
+    netinc = row.get("netinc")
+    ncfo = row.get("ncfo")
+    assets = row.get("assets")
+    if netinc is None or ncfo is None or assets is None:
+        return None
+    prior_assets = (prior_row or {}).get("assets")
+    if prior_assets is not None:
+        avg_assets = (assets + prior_assets) / 2.0
+    else:
+        avg_assets = assets
+    if avg_assets in (None, 0):
+        return None
+    return (netinc - ncfo) / avg_assets
+
+
+def quarterly_cash_runway_months(row: dict) -> float | None:
+    """Months of runway at current quarterly cash-burn rate (ARQ/MRQ row)."""
+    cash = row.get("cashneq")
+    if cash is None or cash <= 0:
+        return 0.0 if cash == 0 else None
+    fcf = free_cash_flow(row)
+    if fcf is None:
+        ncfo = row.get("ncfo")
+        if ncfo is None:
+            return None
+        fcf = ncfo
+    if fcf >= 0:
+        return None  # not burning cash — runway undefined (infinite)
+    monthly_burn = abs(fcf) / 3.0
+    if monthly_burn <= 0:
+        return None
+    return cash / monthly_burn
+
+
+def _metric_cheap(val: float | None, *, higher_is_better: bool, sector_median: float | None) -> bool | None:
+    if val is None:
+        return None
+    if sector_median is not None and sector_median > 0:
+        if higher_is_better:
+            return val >= sector_median
+        return val <= sector_median
+    return None
+
+
+def time_cheap_persistence(
+    annual_history: list[dict],
+    *,
+    sector_pe_median: float | None = None,
+    sector_pb_median: float | None = None,
+    sector_ey_median: float | None = None,
+) -> dict[str, float | int | str | None]:
+    """
+    Count consecutive recent annual periods where valuation metrics indicate cheapness.
+    Returns periods count, classification, and per-metric streaks.
+    """
+    if not annual_history:
+        return {
+            "consecutive_periods": None,
+            "classification": None,
+            "pe_streak": None,
+            "pb_streak": None,
+            "earnings_yield_streak": None,
+        }
+
+    sorted_rows = sorted(annual_history, key=lambda r: r.get("calendardate") or "", reverse=True)
+
+    def streak(metric_key: str, *, higher_is_better: bool, sector_median: float | None) -> int:
+        count = 0
+        for row in sorted_rows:
+            val = row.get(metric_key)
+            if val is None:
+                break
+            cheap = _metric_cheap(val, higher_is_better=higher_is_better, sector_median=sector_median)
+            if cheap is True or (
+                cheap is None
+                and (
+                    (metric_key == "pe" and val > 0 and val < 12)
+                    or (metric_key == "pb" and val > 0 and val < 1.0)
+                    or (metric_key == "earnings_yield" and val > 0.08)
+                )
+            ):
+                count += 1
+            else:
+                break
+        return count
+
+    pe_streak = streak("pe", higher_is_better=False, sector_median=sector_pe_median)
+    pb_streak = streak("pb", higher_is_better=False, sector_median=sector_pb_median)
+    ey_streak = streak("earnings_yield", higher_is_better=True, sector_median=sector_ey_median)
+    consecutive = max(pe_streak, pb_streak, ey_streak)
+
+    if consecutive >= TIME_CHEAP_STRUCTURAL_YEARS:
+        classification = "structural"
+    elif consecutive >= 2:
+        classification = "persistent"
+    elif consecutive >= 1:
+        classification = "recent"
+    else:
+        classification = "none"
+
+    return {
+        "consecutive_periods": consecutive,
+        "classification": classification,
+        "pe_streak": pe_streak,
+        "pb_streak": pb_streak,
+        "earnings_yield_streak": ey_streak,
+    }
+
+
+def peer_industry_secular_trend(peer_annual_rows: list[list[dict]]) -> dict[str, float | bool | None]:
+    """
+    Median 3-year revenue CAGR and gross-margin delta across peer annual histories.
+    peer_declining=True when median revenue CAGR < 0 and margin delta negative.
+    """
+    revenue_cagrs: list[float] = []
+    margin_deltas: list[float] = []
+
+    for history in peer_annual_rows:
+        sorted_rows = sorted(history, key=lambda r: r.get("calendardate") or "", reverse=True)
+        if len(sorted_rows) < 4:
+            continue
+        current = sorted_rows[0]
+        three_yr_ago = sorted_rows[3]
+        rev_now = current.get("revenue")
+        rev_then = three_yr_ago.get("revenue")
+        if rev_now is not None and rev_then not in (None, 0) and rev_now > 0:
+            cagr = (rev_now / rev_then) ** (1 / 3.0) - 1.0
+            revenue_cagrs.append(cagr)
+        gm_now = gross_margin(current)
+        gm_then = gross_margin(three_yr_ago)
+        if gm_now is not None and gm_then is not None:
+            margin_deltas.append(gm_now - gm_then)
+
+    if not revenue_cagrs and not margin_deltas:
+        return {
+            "median_revenue_cagr_3yr": None,
+            "median_gross_margin_delta_3yr": None,
+            "peer_declining": None,
+            "peer_count": 0,
+        }
+
+    def _median(vals: list[float]) -> float | None:
+        if not vals:
+            return None
+        s = sorted(vals)
+        mid = len(s) // 2
+        if len(s) % 2:
+            return s[mid]
+        return (s[mid - 1] + s[mid]) / 2.0
+
+    med_cagr = _median(revenue_cagrs)
+    med_margin = _median(margin_deltas)
+    peer_declining = None
+    if med_cagr is not None and med_margin is not None:
+        peer_declining = med_cagr < 0 and med_margin < 0
+
+    return {
+        "median_revenue_cagr_3yr": med_cagr,
+        "median_gross_margin_delta_3yr": med_margin,
+        "peer_declining": peer_declining,
+        "peer_count": len(revenue_cagrs),
+    }
+
+
+def capital_allocation_track_record(
+    annual_history: list[dict],
+    *,
+    prices_by_period: dict[str, float] | None = None,
+) -> dict[str, float | int | bool | None]:
+    """
+    Revealed capital-allocation quality from share count, buybacks, dividends, and equity raises.
+    Returns composite score 0–100 and component evidence.
+    """
+    if len(annual_history) < 2:
+        return {
+            "score": None,
+            "buyback_at_discount_pct": None,
+            "dilution_rate_3yr": None,
+            "dividend_fcf_coverage": None,
+            "equity_raises_vs_retained_earnings": None,
+        }
+
+    sorted_rows = sorted(annual_history, key=lambda r: r.get("calendardate") or "", reverse=True)
+    current = sorted_rows[0]
+    prior_3yr = sorted_rows[3] if len(sorted_rows) > 3 else sorted_rows[-1]
+
+    shares_now = current.get("sharesbas")
+    shares_then = prior_3yr.get("sharesbas")
+    dilution_rate = None
+    if shares_now and shares_then and shares_then > 0:
+        years = max(1, min(3, len(sorted_rows) - 1))
+        dilution_rate = (shares_now / shares_then) ** (1 / years) - 1.0
+
+    buyback_discount_pct = None
+    buyback_events = 0
+    buyback_at_discount = 0
+    for row in sorted_rows[:5]:
+        repurchase = row.get("ncfcommon")
+        if repurchase is None or repurchase >= 0:
+            continue
+        period = row.get("calendardate")
+        price = (prices_by_period or {}).get(period or "")
+        bvps = book_value_per_share(row)
+        if price is not None and bvps not in (None, 0):
+            buyback_events += 1
+            if price < bvps:
+                buyback_at_discount += 1
+    if buyback_events:
+        buyback_discount_pct = buyback_at_discount / buyback_events
+
+    fcf = free_cash_flow(current)
+    div = current.get("ncfdiv")
+    dividend_coverage = None
+    if fcf is not None and div is not None and div < 0:
+        dividend_coverage = safe_div(fcf, abs(div))
+
+    equity_raised = sum(abs(r.get("ncfcommon") or 0) for r in sorted_rows[:3] if (r.get("ncfcommon") or 0) > 0)
+    retearn_growth = None
+    re_now = current.get("retearn")
+    re_then = prior_3yr.get("retearn")
+    if re_now is not None and re_then is not None:
+        retearn_growth = re_now - re_then
+    raises_vs_value = None
+    if retearn_growth is not None:
+        raises_vs_value = retearn_growth - equity_raised
+
+    score_parts: list[float] = []
+    if buyback_discount_pct is not None:
+        score_parts.append(buyback_discount_pct * 100)
+    if dilution_rate is not None:
+        score_parts.append(max(0.0, min(100.0, 50.0 - dilution_rate * 500)))
+    if dividend_coverage is not None:
+        score_parts.append(min(100.0, dividend_coverage * 50))
+    if raises_vs_value is not None:
+        score_parts.append(70.0 if raises_vs_value > 0 else 30.0)
+
+    score = round(sum(score_parts) / len(score_parts), 1) if score_parts else None
+
+    return {
+        "score": score,
+        "buyback_at_discount_pct": buyback_discount_pct,
+        "dilution_rate_3yr": dilution_rate,
+        "dividend_fcf_coverage": dividend_coverage,
+        "equity_raises_vs_retained_earnings": raises_vs_value,
+    }

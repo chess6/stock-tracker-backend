@@ -49,6 +49,8 @@ _SCORE_FIELD_ALIASES = {
 
 _DERIVED_FIELDS = frozenset({"gross_margin_trend", "fcf_yield", "ev_fcf", "dilution_rate", "market_cap"})
 _INSIDER_FIELDS = frozenset({"buy6m", "buy3m", "cluster_count"})
+_NARRATIVE_FIELDS = frozenset({"divergence_score", "divergence_signal"})
+_NARRATIVE_STRING_FIELDS = frozenset({"divergence_signal"})
 
 
 def _finite(value: float | None) -> bool:
@@ -172,7 +174,7 @@ def _resolve_registry_api_key(metric: str) -> str | None:
 
 
 def _field_kind(metric: str) -> tuple[str, str]:
-    """Return (kind, resolved_key) where kind is score|metric|derived|insider."""
+    """Return (kind, resolved_key) where kind is score|metric|derived|insider|narrative."""
     key = metric.strip()
     if key in _SCORE_FIELD_ALIASES:
         return "score", _SCORE_FIELD_ALIASES[key]
@@ -180,6 +182,8 @@ def _field_kind(metric: str) -> tuple[str, str]:
         return "derived", key
     if key in _INSIDER_FIELDS:
         return "insider", key
+    if key in _NARRATIVE_FIELDS:
+        return "narrative", key
     canonical = key if key in METRIC_REGISTRY else canonical_key(key)
     if canonical and METRIC_REGISTRY.get(canonical, {}).get("category") == "score":
         return "score", METRIC_REGISTRY[canonical]["api_key"]
@@ -226,7 +230,23 @@ def _read_field(candidate: dict, metric: str) -> float | None:
         return candidate.get("derived", {}).get(resolved)
     if kind == "insider":
         return candidate.get("insider", {}).get(resolved)
+    if kind == "narrative":
+        return candidate.get("narrative", {}).get(resolved)
     return None
+
+
+def _compare_string(op: str, actual: str | None, expected: Any) -> bool:
+    if actual is None or not str(actual).strip():
+        return False
+    actual_s = str(actual).strip()
+    if op == "eq":
+        return actual_s == str(expected).strip()
+    if op == "in":
+        if not isinstance(expected, list):
+            return False
+        allowed = {str(v).strip() for v in expected}
+        return actual_s in allowed
+    return False
 
 
 def _compare(op: str, actual: float | None, expected: Any) -> bool:
@@ -275,9 +295,11 @@ def _evaluate_filter(
     actual = _read_field(candidate, metric)
     passed = False
     threshold = None
+    kind, resolved = _field_kind(metric)
 
-    if op in {"percentile_lt", "percentile_gt"}:
-        kind, resolved = _field_kind(metric)
+    if kind == "narrative" and resolved in _NARRATIVE_STRING_FIELDS:
+        passed = _compare_string(op, actual, expected)
+    elif op in {"percentile_lt", "percentile_gt"}:
         api_key = resolved if kind == "metric" else None
         if kind == "score":
             api_key = resolved
@@ -300,11 +322,16 @@ def _evaluate_filter(
         passed = _compare(op, actual, expected)
 
     margin = None
-    if actual is not None and _finite(float(actual)) and op in {"lt", "lte", "gt", "gte"}:
+    if actual is not None and op in {"lt", "lte", "gt", "gte"}:
         try:
-            margin = float(actual) - float(expected)
+            actual_f = float(actual)
         except (TypeError, ValueError):
-            margin = None
+            actual_f = None
+        if actual_f is not None and _finite(actual_f):
+            try:
+                margin = actual_f - float(expected)
+            except (TypeError, ValueError):
+                margin = None
 
     return {
         "metric": metric,
@@ -380,6 +407,14 @@ def _build_candidates(
                 "cluster_count": cluster_counts.get(ticker, 0),
             },
             "price": price,
+        }
+
+    narrative_snapshots = repo.fetch_latest_narrative_snapshots(list(candidates.keys()))
+    for ticker, candidate in candidates.items():
+        snap = narrative_snapshots.get(ticker)
+        candidate["narrative"] = {
+            "divergence_score": snap.get("divergence_score") if snap else None,
+            "divergence_signal": snap.get("divergence_signal") if snap else None,
         }
 
     return candidates
@@ -466,6 +501,7 @@ def run_composable_screen(
                 "scores": candidate.get("scores"),
                 "derived": candidate.get("derived"),
                 "insider": candidate.get("insider"),
+                "narrative": candidate.get("narrative"),
                 "filterEvidence": evidence,
                 "filtersPassed": sum(1 for item in evidence if item["passed"]),
                 "filtersTotal": len(evidence),
@@ -483,6 +519,7 @@ def run_composable_screen(
                     "scores": row.get("scores"),
                     "derived": row.get("derived"),
                     "insider": row.get("insider"),
+                    "narrative": row.get("narrative"),
                 },
                 sort_spec["metric"],
             )

@@ -7,6 +7,7 @@ from .metric_primitives import (
     book_value_per_share,
     cash_to_debt,
     cfo_margin,
+    conservative_nav_per_share,
     current_ratio,
     debt_equity,
     ebitda_margin,
@@ -17,11 +18,13 @@ from .metric_primitives import (
     leverage,
     net_margin,
     operating_margin,
+    price_to_conservative_nav,
     quick_ratio,
     resolve_ebitda,
     roa,
     roe,
     safe_div,
+    sloan_accruals,
     total_debt,
 )
 
@@ -107,6 +110,9 @@ def compute_period_metrics(row: dict, price: float | None = None) -> dict[str, f
         "cash_to_debt": cash_to_debt(row),
         "div_yield": div_yield,
         "asset_turnover": asset_turnover(row),
+        "conservative_nav_per_share": conservative_nav_per_share(row),
+        "price_to_conservative_nav": price_to_conservative_nav(price, conservative_nav_per_share(row)),
+        "sloan_accruals": sloan_accruals(row),
     }
 
 
@@ -144,6 +150,9 @@ _API_FIELD_MAP: dict[str, str] = {
     "cash_to_debt": "cashToDebt",
     "div_yield": "divYield",
     "asset_turnover": "assetTurnover",
+    "conservative_nav_per_share": "conservativeNavPerShare",
+    "price_to_conservative_nav": "priceToConservativeNav",
+    "sloan_accruals": "sloanAccruals",
 }
 
 

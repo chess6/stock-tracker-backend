@@ -238,9 +238,9 @@ def insiders_buying_sums():
     tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
     min_buy6m = request.args.get("min_buy6m", type=float)
     rows = get_insiders_service().buying_sums(tickers or None, min_buy6m=min_buy6m)
-    source = "sec_edgar" if rows else "disabled"
     if tickers:
         by_ticker = {row["ticker"]: row for row in rows if row.get("ticker")}
+        has_cache = any(ticker in by_ticker for ticker in tickers)
         rows = [
             by_ticker.get(
                 ticker,
@@ -255,6 +255,9 @@ def insiders_buying_sums():
             )
             for ticker in tickers
         ]
+        source = "sec_edgar" if has_cache else "disabled"
+    else:
+        source = "sec_edgar" if rows else "disabled"
     return jsonify({"rows": rows, "meta": {"source": source}})
 
 

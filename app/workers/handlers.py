@@ -8,6 +8,9 @@ from ..clients.sec import SecClient
 from ..repositories import Repository
 from ..services.fundamentals import FundamentalsService
 from ..services.insiders import InsidersService
+from ..services.edgar_ingestion import EdgarIngestionService
+from ..services.supporting_edgar_ingestion import SupportingEdgarIngestionService
+from ..services.finra_short_interest import FinraShortInterestService
 from ..services.news import NewsService
 from ..services.prices import PricesService
 from ..services.ticker_universes import get_universe_tickers
@@ -22,6 +25,9 @@ class JobContext:
     news: NewsService
     prices: PricesService
     insiders: InsidersService
+    edgar: EdgarIngestionService
+    supporting_edgar: SupportingEdgarIngestionService
+    finra_short_interest: FinraShortInterestService
     sec_company_tickers_url: str
     default_tickers: list[str]
 
@@ -129,6 +135,26 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
             return ctx.insiders.refresh_insiders(tickers, max_filings_per_company=int(max_filings))
         return ctx.insiders.refresh_insiders(tickers)
 
+    def refresh_edgar_events(payload: dict) -> dict:
+        tickers = payload.get("tickers")
+        if not tickers and payload.get("universe"):
+            tickers = get_universe_tickers(str(payload["universe"]))
+        if not tickers:
+            tickers = ctx.default_tickers
+        return ctx.edgar.refresh_edgar_events(tickers)
+
+    def refresh_supporting_edgar(payload: dict) -> dict:
+        tickers = payload.get("tickers")
+        if not tickers and payload.get("universe"):
+            tickers = get_universe_tickers(str(payload["universe"]))
+        if not tickers:
+            tickers = ctx.default_tickers
+        return ctx.supporting_edgar.refresh_supporting_edgar(tickers)
+
+    def refresh_short_interest(payload: dict) -> dict:
+        tickers = payload.get("tickers")
+        return ctx.finra_short_interest.refresh_short_interest(tickers)
+
     def enrich_metadata(payload: dict) -> dict:
         if payload.get("all_missing"):
             return ctx.fundamentals.enrich_company_metadata(None, all_missing=True)
@@ -191,6 +217,9 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         "refresh_prices": refresh_prices,
         "refresh_macro": refresh_macro,
         "refresh_insiders": refresh_insiders,
+        "refresh_edgar_events": refresh_edgar_events,
+        "refresh_supporting_edgar": refresh_supporting_edgar,
+        "refresh_short_interest": refresh_short_interest,
         "extract_articles": extract_articles,
         "enrich_articles": enrich_articles,
         "bootstrap": bootstrap,
@@ -214,6 +243,9 @@ def build_context(config: dict) -> JobContext:
         ),
         prices=PricesService(repo),
         insiders=InsidersService(repo, sec_client),
+        edgar=EdgarIngestionService(repo, sec_client),
+        supporting_edgar=SupportingEdgarIngestionService(repo, sec_client),
+        finra_short_interest=FinraShortInterestService(repo, user_agent=config["sec_user_agent"]),
         sec_company_tickers_url=config["sec_company_tickers_url"],
         default_tickers=config["default_tickers"],
     )

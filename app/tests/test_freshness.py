@@ -204,6 +204,6 @@ def test_pipeline_status_route(app, client):
     assert "freshness" in payload
     assert payload["freshness"]["pricesFetchedAt"] is not None
     assert payload["freshness"]["fundamentalsUpdatedAt"] is not None
-    assert payload["versions"]["scoring"] == 1
+    assert payload["versions"]["scoring"] == 2
     assert "stale" in payload
     assert "recentJobRuns" in payload

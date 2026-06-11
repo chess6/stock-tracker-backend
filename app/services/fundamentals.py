@@ -656,8 +656,10 @@ class FundamentalsService:
                 "altman_z": record["altman_z"],
                 "beneish_m": record["beneish_m"],
                 "survivability": record["survivability"],
+                "survivability_bucket": record.get("survivability_bucket"),
                 "piotroski_components": scores_to_json(record["piotroski_components"]),
                 "altman_components": scores_to_json(record["altman_components"]),
+                "beneish_components": scores_to_json(record.get("beneish_components")),
             }
             for record in score_records
         ]
@@ -848,22 +850,44 @@ class FundamentalsService:
                     latest_by_ticker[row["ticker"]] = row
             wide_rows = list(latest_by_ticker.values())
 
-        prices_by_ticker: dict[str, float] = {}
+        from ..repositories import utc_now_iso
+
+        period_ends_by_ticker: dict[str, list[str]] = {}
+        for row in wide_rows:
+            ticker = row["ticker"]
+            period_end = row.get("calendardate")
+            if period_end:
+                period_ends_by_ticker.setdefault(ticker, []).append(period_end)
+
+        prices_by_ticker_period: dict[tuple[str, str], float | None] = {}
+        for ticker, period_ends in period_ends_by_ticker.items():
+            mapped = self.repo.fetch_prices_by_period_ends(ticker, period_ends)
+            for period_end, price in mapped.items():
+                prices_by_ticker_period[(ticker, period_end)] = price
+
+        latest_prices: dict[str, float] = {}
         for ticker in tickers:
             try:
                 price_rows = self.repo.fetch_prices(ticker.upper(), limit=1)
             except Exception:
                 continue
             if price_rows:
-                prices_by_ticker[ticker.upper()] = price_rows[0]["close"]
+                latest_prices[ticker.upper()] = price_rows[0]["close"]
+
         datatable_rows = [
             [row.get(column["name"]) for column in RAW_COLUMNS]
             for row in wide_rows
         ]
-        metrics = {
-            row["ticker"]: build_company_metrics(row, price=prices_by_ticker.get(row["ticker"]))
-            for row in wide_rows
-        }
+        metrics: dict[str, dict] = {}
+        for row in wide_rows:
+            ticker = row["ticker"]
+            period_end = row.get("calendardate")
+            price = None
+            if period_end:
+                price = prices_by_ticker_period.get((ticker, period_end))
+            if price is None:
+                price = latest_prices.get(ticker)
+            metrics[ticker] = build_company_metrics(row, price=price)
         return {
             "metrics": metrics,
             "raw": {
@@ -871,5 +895,9 @@ class FundamentalsService:
                     "columns": RAW_COLUMNS,
                     "data": datatable_rows,
                 }
+            },
+            "meta": {
+                "source": "sqlite",
+                "computedAt": utc_now_iso(),
             },
         }

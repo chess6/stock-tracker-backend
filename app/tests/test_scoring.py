@@ -180,6 +180,13 @@ def test_golden_fixture_scores_match_baseline():
         ), f"{metric} drift: {latest[metric]} vs {expected}"
 
 
+def test_altman_z_returns_none_without_market_cap():
+    row = _base_row()
+    z, components = compute_altman_z(row, market_cap=None)
+    assert z is None
+    assert components == {}
+
+
 def test_altman_z_returns_none_for_zero_assets_or_liabilities():
     row = _base_row(assets=0, liabilities=900.0)
     z, components = compute_altman_z(row, market_cap=1000.0)
@@ -788,7 +795,10 @@ def test_research_routes_return_screener_and_ticker_payload(app, client):
             )
         repo.upsert_prices(
             "AAPL",
-            [{"date": "2025-01-20", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "volume": 100}],
+            [
+                {"date": "2024-12-31", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "volume": 100},
+                {"date": "2025-01-20", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "volume": 100},
+            ],
             source="test",
         )
         from app.services.fundamentals import FundamentalsService
@@ -802,11 +812,25 @@ def test_research_routes_return_screener_and_ticker_payload(app, client):
 
         FundamentalsService(repo, StubSec())._refresh_company_scores(company["id"], "AAPL")[0]
 
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_company_narrative_snapshots([
+            {
+                "ticker": "AAPL",
+                "snapshot_date": "2025-01-01",
+                "states": [],
+                "divergence_score": 0.75,
+                "divergence_signal": "rerating_candidate",
+                "emerging_situations": [],
+            }
+        ])
+
     screener = client.get("/api/research/screener?tickers=AAPL&dimension=MRY")
     assert screener.status_code == 200
     payload = screener.get_json()
     assert "AAPL" in payload["results"]
     assert payload["results"]["AAPL"]["scores"]["altmanZ"] is not None
+    assert payload["results"]["AAPL"]["narrativeDivergence"]["signal"] == "rerating_candidate"
 
     detail = client.get("/api/research/ticker/AAPL")
     assert detail.status_code == 200

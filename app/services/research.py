@@ -24,6 +24,7 @@ from .insider_analysis import (
     format_transaction,
 )
 from .narrative import build_narrative_analysis
+from .latent_metrics import compute_latent_metrics, latent_metrics_to_api
 
 logger = logging.getLogger("stock_tracker.research")
 
@@ -60,6 +61,7 @@ class ResearchService:
             row["ticker"]: row for row in self.repo.fetch_insider_summary_90d(tickers)
         }
         self._enrich_insider_summaries(insider_summary, tickers)
+        narrative_snapshots = self.repo.fetch_latest_narrative_snapshots(tickers)
 
         results: dict[str, dict] = {}
         for row in wide_rows:
@@ -71,6 +73,20 @@ class ResearchService:
             prior = annual_rows[1] if len(annual_rows) > 1 else None
 
             company = self.repo.get_company_by_ticker(ticker)
+            narrative_snap = narrative_snapshots.get(ticker)
+            narrative_divergence = None
+            if narrative_snap:
+                narrative_divergence = {
+                    "signal": narrative_snap.get("divergence_signal"),
+                    "divergenceScore": narrative_snap.get("divergence_score"),
+                }
+            latent = compute_latent_metrics(
+                self.repo,
+                ticker,
+                row=row,
+                price=price,
+                sector=(company or {}).get("sector"),
+            )
             results[ticker] = {
                 "ticker": ticker,
                 "companyName": row.get("company_name") or (company or {}).get("name"),
@@ -80,6 +96,7 @@ class ResearchService:
                 "dimension": row.get("dimension"),
                 "fundamentals": {col["name"]: row.get(col["name"]) for col in RAW_COLUMNS if col["type"] == "double"},
                 "metrics": metrics,
+                "thesisMetrics": latent_metrics_to_api(latent),
                 "scores": scores_by_ticker.get(ticker),
                 "marginTrends": {
                     "grossMargin3yrDelta": margin_trend_delta(annual_rows, 3, _gross_margin),
@@ -87,6 +104,7 @@ class ResearchService:
                 },
                 "shareDilutionRate": share_dilution_rate(row, prior),
                 "insiderSummary": insider_summary.get(ticker),
+                "narrativeDivergence": narrative_divergence,
                 "price": {
                     "latest": price,
                     "stats": market_stats.get(ticker, {}),

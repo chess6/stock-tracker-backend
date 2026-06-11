@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 from typing import Callable
 
+from ..db import is_sqlite_lock_error
 from ..repositories import Repository
 from .handlers import JobContext, build_handlers
 
@@ -90,6 +92,17 @@ class WorkerRunner:
     def run_forever(self) -> None:
         logger.info("Worker started")
         while True:
-            processed = self.process_once()
+            try:
+                processed = self.process_once()
+            except sqlite3.OperationalError as exc:
+                if is_sqlite_lock_error(exc):
+                    logger.warning(
+                        "SQLite lock while polling job queue; backing off %ss: %s",
+                        self.poll_interval_seconds,
+                        exc,
+                    )
+                    time.sleep(self.poll_interval_seconds)
+                    continue
+                raise
             if not processed:
                 time.sleep(self.poll_interval_seconds)

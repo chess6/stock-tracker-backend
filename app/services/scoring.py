@@ -30,16 +30,19 @@ def compute_piotroski_f(current: dict, prior: dict) -> tuple[int | None, dict[st
     ncfo = current.get("ncfo")
     netinc = current.get("netinc")
 
-    if roa_current is None or ncfo is None or netinc is None:
+    if roa_current is None and ncfo is None and netinc is None:
         return None, {}
 
-    components["roa"] = 1 if roa_current > 0 else 0
-    components["cfo"] = 1 if ncfo > 0 else 0
-    if roa_prior is not None:
+    if roa_current is not None:
+        components["roa"] = 1 if roa_current > 0 else 0
+    if ncfo is not None:
+        components["cfo"] = 1 if ncfo > 0 else 0
+    if roa_current is not None and roa_prior is not None:
         components["delta_roa"] = 1 if roa_current > roa_prior else 0
-    else:
+    elif roa_current is not None:
         components["delta_roa"] = 0
-    components["accruals"] = 1 if ncfo > netinc else 0
+    if ncfo is not None and netinc is not None:
+        components["accruals"] = 1 if ncfo > netinc else 0
 
     leverage_current = _leverage(current)
     leverage_prior = _leverage(prior)
@@ -107,11 +110,14 @@ def compute_altman_z(row: dict, market_cap: float | None = None) -> tuple[float 
     if any(v is None for v in (wc_ta, re_ta, ebit_ta, sales_ta)):
         return None, {}
 
+    if mve_tl is None:
+        return None, {}
+
     components = {
         "wc_ta": wc_ta,
         "re_ta": re_ta,
         "ebit_ta": ebit_ta,
-        "mve_tl": mve_tl if mve_tl is not None else 0.0,
+        "mve_tl": mve_tl,
         "sales_ta": sales_ta,
     }
     z = (
@@ -394,11 +400,16 @@ def compute_scores_for_periods(
             fcf_positive_streak=fcf_streak,
         )
 
+        piotroski_completeness = (
+            round(len(piotroski_components) / 9.0, 3) if piotroski_components else None
+        )
+
         records.append(
             {
                 "period_end": period_end,
                 "dimension": row.get("dimension") or "ARY",
                 "piotroski_f": piotroski_f,
+                "piotroski_completeness": piotroski_completeness,
                 "altman_z": altman_z,
                 "beneish_m": beneish_m,
                 "survivability": survivability,

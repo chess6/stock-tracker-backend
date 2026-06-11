@@ -16,7 +16,8 @@ from ..repositories import Repository, utc_now_iso
 
 logger = logging.getLogger("stock_tracker.pipeline.news")
 from .article_dedup import canonicalize_url, normalize_published_at
-from .article_enrichment import infer_topic_cluster, simple_sentiment, simhash_fingerprint
+from .article_dedup import compute_simhash
+from .article_enrichment import infer_topic_cluster, simple_sentiment
 from .entity_linker_factory import create_entity_linker
 from .entity_linking import build_entity_link_text
 
@@ -296,7 +297,7 @@ class NewsService:
                 skip_dedup=skip_dedup,
                 defer_commit=batch_mode,
             )
-            fingerprint = simhash_fingerprint(enrichment_text)
+            fingerprint = compute_simhash(entry.get("title") or "", summary_text)
             self.repo.upsert_embedding_metadata(
                 article_id,
                 model="simhash",

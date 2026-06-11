@@ -387,6 +387,87 @@ def test_screen_flat_filters_backward_compatible_as_and_group(app, client):
     assert payload["meta"]["matched"] >= 1
 
 
+def test_screen_divergence_score_filter(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+        repo.upsert_company_narrative_snapshots([
+            {
+                "ticker": "AAPL",
+                "snapshot_date": "2026-06-09",
+                "states": [{"state": "bankruptcy_fear", "score": 0.8, "articleCount": 2}],
+                "divergence_score": 0.82,
+                "divergence_signal": "rerating_candidate",
+                "emerging_situations": [],
+            }
+        ])
+
+    response = client.post(
+        "/api/research/screen",
+        json={
+            "tickers": ["AAPL"],
+            "filters": [{"metric": "divergence_score", "op": "gte", "value": 0.7}],
+            "limit": 5,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["meta"]["matched"] == 1
+    row = payload["results"][0]
+    evidence = {item["metric"]: item for item in row["filterEvidence"]}
+    assert evidence["divergence_score"]["passed"] is True
+    assert evidence["divergence_score"]["actual"] == 0.82
+
+
+def test_screen_divergence_signal_filter(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+        repo.upsert_company_narrative_snapshots([
+            {
+                "ticker": "AAPL",
+                "snapshot_date": "2026-06-09",
+                "states": [{"state": "bankruptcy_fear", "score": 0.8, "articleCount": 2}],
+                "divergence_score": 0.82,
+                "divergence_signal": "rerating_candidate",
+                "emerging_situations": [],
+            }
+        ])
+
+    response = client.post(
+        "/api/research/screen",
+        json={
+            "tickers": ["AAPL"],
+            "filters": [{"metric": "divergence_signal", "op": "eq", "value": "rerating_candidate"}],
+            "limit": 5,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["meta"]["matched"] == 1
+    evidence = {item["metric"]: item for item in payload["results"][0]["filterEvidence"]}
+    assert evidence["divergence_signal"]["passed"] is True
+    assert evidence["divergence_signal"]["actual"] == "rerating_candidate"
+
+
+def test_screen_divergence_filter_excludes_missing_snapshot(app, client):
+    with app.app_context():
+        _seed_aapl_fundamentals(Repository(get_db()))
+
+    response = client.post(
+        "/api/research/screen",
+        json={
+            "tickers": ["AAPL"],
+            "filters": [{"metric": "divergence_score", "op": "gte", "value": 0.7}],
+            "limit": 5,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["meta"]["matched"] == 0
+    assert payload["results"] == []
+
+
 def test_screen_rejects_invalid_filter_group_op(app):
     with app.app_context():
         repo = Repository(get_db())

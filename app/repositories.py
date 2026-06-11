@@ -5,6 +5,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
+from .db import retry_on_sqlite_lock
+
 try:
     from rapidfuzz import fuzz  # type: ignore
 except ImportError:  # pragma: no cover
@@ -675,8 +677,10 @@ class Repository:
                 record.get("altman_z"),
                 record.get("beneish_m"),
                 record.get("survivability"),
+                record.get("survivability_bucket"),
                 record.get("piotroski_components"),
                 record.get("altman_components"),
+                record.get("beneish_components"),
                 record.get("scoring_version", CURRENT_SCORING_VERSION),
             )
             for record in records
@@ -688,15 +692,19 @@ class Repository:
             INSERT INTO company_scores (
                 company_id, period_end, dimension,
                 piotroski_f, altman_z, beneish_m, survivability,
-                piotroski_components, altman_components, computed_at, scoring_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                survivability_bucket,
+                piotroski_components, altman_components, beneish_components,
+                computed_at, scoring_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
             ON CONFLICT(company_id, period_end, dimension) DO UPDATE SET
                 piotroski_f=excluded.piotroski_f,
                 altman_z=excluded.altman_z,
                 beneish_m=excluded.beneish_m,
                 survivability=excluded.survivability,
+                survivability_bucket=excluded.survivability_bucket,
                 piotroski_components=excluded.piotroski_components,
                 altman_components=excluded.altman_components,
+                beneish_components=excluded.beneish_components,
                 computed_at=CURRENT_TIMESTAMP,
                 scoring_version=excluded.scoring_version
             """,
@@ -715,8 +723,10 @@ class Repository:
                 altman_z,
                 beneish_m,
                 survivability,
+                survivability_bucket,
                 piotroski_components,
                 altman_components,
+                beneish_components,
                 computed_at
             FROM company_scores
             WHERE company_id = ? AND dimension = ?
@@ -800,6 +810,41 @@ class Repository:
                 output[row["ticker"]] = int(rank)
         return output
 
+    def fetch_distinct_rank_snapshot_dates(
+        self,
+        *,
+        composite: str,
+        limit: int = 12,
+    ) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT snapshot_date
+            FROM company_rank_snapshots
+            WHERE composite = ?
+            ORDER BY snapshot_date DESC
+            LIMIT ?
+            """,
+            (composite.strip().lower(), max(1, int(limit))),
+        ).fetchall()
+        return [row["snapshot_date"] for row in reversed(rows)]
+
+    def fetch_rank_snapshot_rows(
+        self,
+        *,
+        composite: str,
+        snapshot_date: str,
+    ) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT ticker, composite_score, rank_in_universe
+            FROM company_rank_snapshots
+            WHERE composite = ? AND snapshot_date = ?
+            ORDER BY rank_in_universe ASC
+            """,
+            (composite.strip().lower(), snapshot_date),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def fetch_company_rank_history(
         self,
         ticker: str,
@@ -868,6 +913,24 @@ class Repository:
         self.conn.commit()
         return len(rows)
 
+    def fetch_narrative_snapshot_history(
+        self,
+        ticker: str,
+        *,
+        limit: int = 24,
+    ) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT snapshot_date, divergence_score, divergence_signal
+            FROM company_narrative_snapshots
+            WHERE ticker = ?
+            ORDER BY snapshot_date DESC
+            LIMIT ?
+            """,
+            (ticker.strip().upper(), max(1, int(limit))),
+        ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
     def fetch_latest_narrative_snapshots(self, tickers: list[str]) -> dict[str, dict]:
         import json
 
@@ -922,8 +985,10 @@ class Repository:
                 cs.altman_z,
                 cs.beneish_m,
                 cs.survivability,
+                cs.survivability_bucket,
                 cs.piotroski_components,
                 cs.altman_components,
+                cs.beneish_components,
                 cs.computed_at
             FROM company_scores cs
             JOIN companies c ON c.id = cs.company_id
@@ -939,6 +1004,80 @@ class Repository:
         ).fetchall()
         return {row["ticker"]: self._format_score_row(row) for row in rows}
 
+    def fetch_company_scores_on_or_before(
+        self,
+        ticker: str,
+        as_of_date: str,
+        *,
+        dimension: str = "ARY",
+    ) -> dict | None:
+        """Latest company_scores row with period_end on or before as_of_date."""
+        row = self.conn.execute(
+            """
+            SELECT
+                cs.period_end,
+                cs.dimension,
+                cs.piotroski_f,
+                cs.altman_z,
+                cs.beneish_m,
+                cs.survivability,
+                cs.survivability_bucket,
+                cs.piotroski_components,
+                cs.altman_components,
+                cs.beneish_components,
+                cs.computed_at
+            FROM company_scores cs
+            JOIN companies c ON c.id = cs.company_id
+            WHERE c.ticker = ?
+              AND cs.dimension = ?
+              AND cs.period_end <= ?
+            ORDER BY cs.period_end DESC
+            LIMIT 1
+            """,
+            (ticker.strip().upper(), dimension, as_of_date[:10]),
+        ).fetchone()
+        if not row:
+            return None
+        formatted = self._format_score_row(row)
+        return {
+            "piotroski_f": formatted.get("piotroskiF"),
+            "altman_z": formatted.get("altmanZ"),
+            "beneish_m": formatted.get("beneishM"),
+            "survivability": formatted.get("survivability"),
+            "survivability_bucket": formatted.get("survivabilityBucket"),
+            "period_end": formatted.get("periodEnd"),
+        }
+
+    def fetch_fundamentals_wide_on_or_before(
+        self,
+        ticker: str,
+        as_of_date: str,
+        *,
+        dimension: str = "MRY",
+    ) -> dict | None:
+        """Pivot fundamentals to a wide row for the latest period_end on or before as_of_date."""
+        from .services.fundamentals import (
+            collapse_narrow_fundamentals_rows,
+            pivot_fundamentals_rows,
+        )
+
+        narrow = self.fetch_fundamentals_rows(
+            [ticker.strip().upper()],
+            dimension=dimension,
+        )
+        if not narrow:
+            return None
+        filtered = [row for row in narrow if (row.get("period_end") or "")[:10] <= as_of_date[:10]]
+        if not filtered:
+            return None
+        annual = dimension.upper() in {"MRY", "ARY"}
+        collapsed = collapse_narrow_fundamentals_rows(filtered, annual=annual)
+        wide = pivot_fundamentals_rows(collapsed, canonical_annual=annual)
+        if not wide:
+            return None
+        wide.sort(key=lambda item: item.get("calendardate") or "", reverse=True)
+        return wide[0]
+
     @staticmethod
     def _format_score_row(row: sqlite3.Row) -> dict:
         import json
@@ -950,6 +1089,7 @@ class Repository:
             "altmanZ": row["altman_z"],
             "beneishM": row["beneish_m"],
             "survivability": row["survivability"],
+            "survivabilityBucket": row["survivability_bucket"],
             "computedAt": row["computed_at"],
         }
         if row["piotroski_components"]:
@@ -962,6 +1102,11 @@ class Repository:
                 output["altmanComponents"] = json.loads(row["altman_components"])
             except json.JSONDecodeError:
                 output["altmanComponents"] = None
+        if row["beneish_components"]:
+            try:
+                output["beneishComponents"] = json.loads(row["beneish_components"])
+            except json.JSONDecodeError:
+                output["beneishComponents"] = None
         return output
 
     def fetch_price_history(self, ticker: str, *, through_date: str | None = None) -> list[dict]:
@@ -2511,22 +2656,33 @@ class Repository:
         return job_id
 
     def claim_next_job(self) -> dict | None:
-        row = self.conn.execute(
-            """
-            UPDATE ingestion_jobs
-            SET status = 'running',
-                locked_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = (
-                SELECT id FROM ingestion_jobs
-                WHERE status = 'queued' AND available_at <= CURRENT_TIMESTAMP
-                ORDER BY priority ASC, id ASC
-                LIMIT 1
-            )
-            RETURNING id, job_type, payload_json, attempt_count
-            """
-        ).fetchone()
-        self.conn.commit()
+        def _claim() -> sqlite3.Row | None:
+            # Drop any read transaction left open by a prior handler on this connection.
+            self.conn.rollback()
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.conn.execute(
+                    """
+                    UPDATE ingestion_jobs
+                    SET status = 'running',
+                        locked_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = (
+                        SELECT id FROM ingestion_jobs
+                        WHERE status = 'queued' AND available_at <= CURRENT_TIMESTAMP
+                        ORDER BY priority ASC, id ASC
+                        LIMIT 1
+                    )
+                    RETURNING id, job_type, payload_json, attempt_count
+                    """
+                ).fetchone()
+                self.conn.commit()
+                return row
+            except Exception:
+                self.conn.rollback()
+                raise
+
+        row = retry_on_sqlite_lock(_claim, operation="claim_next_job")
         if not row:
             return None
         return {
@@ -3021,3 +3177,304 @@ class Repository:
             (job_id, error_message),
         )
         self.conn.commit()
+
+    def upsert_company_edgar_events(self, company_id: int, events: Iterable[dict]) -> int:
+        rows = [
+            (
+                company_id,
+                item.get("form_type"),
+                item.get("item_number"),
+                item.get("filed_date"),
+                item.get("event_type"),
+                item.get("summary"),
+                item.get("accession"),
+                item.get("source", "sec_edgar"),
+            )
+            for item in events
+        ]
+        if not rows:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO company_edgar_events (
+                company_id, form_type, item_number, filed_date, event_type, summary, accession, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(company_id, accession, item_number, event_type) DO UPDATE SET
+                filed_date=excluded.filed_date,
+                summary=excluded.summary
+            """,
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def upsert_company_edgar_flags(self, company_id: int, flags: Iterable[dict]) -> int:
+        rows = [
+            (
+                company_id,
+                item.get("flag_type"),
+                item.get("filed_date"),
+                item.get("accession"),
+                item.get("details"),
+                int(item.get("active", 1)),
+            )
+            for item in flags
+        ]
+        if not rows:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO company_edgar_flags (
+                company_id, flag_type, filed_date, accession, details, active, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(company_id, flag_type) DO UPDATE SET
+                filed_date=excluded.filed_date,
+                accession=excluded.accession,
+                details=excluded.details,
+                active=excluded.active,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def upsert_company_insider_ownership(self, company_id: int, record: dict) -> int:
+        self.conn.execute(
+            """
+            INSERT INTO company_insider_ownership (
+                company_id, as_of_date, ownership_pct, shares_held, shares_outstanding, source, computed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(company_id, as_of_date) DO UPDATE SET
+                ownership_pct=excluded.ownership_pct,
+                shares_held=excluded.shares_held,
+                shares_outstanding=excluded.shares_outstanding,
+                computed_at=CURRENT_TIMESTAMP
+            """,
+            (
+                company_id,
+                record.get("as_of_date"),
+                record.get("ownership_pct"),
+                record.get("shares_held"),
+                record.get("shares_outstanding"),
+                record.get("source", "sec_edgar"),
+            ),
+        )
+        self.conn.commit()
+        return 1
+
+    def upsert_company_activist_filings(self, company_id: int, filings: Iterable[dict]) -> int:
+        rows = [
+            (
+                company_id,
+                item.get("filed_date"),
+                item.get("form_type"),
+                item.get("accession"),
+                item.get("filer_name"),
+                item.get("ownership_pct"),
+                item.get("summary"),
+                item.get("source", "sec_edgar"),
+            )
+            for item in filings
+        ]
+        if not rows:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO company_activist_filings (
+                company_id, filed_date, form_type, accession, filer_name, ownership_pct, summary, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(company_id, accession) DO UPDATE SET
+                filed_date=excluded.filed_date,
+                form_type=excluded.form_type,
+                summary=excluded.summary
+            """,
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def upsert_company_debt_maturities(
+        self,
+        company_id: int,
+        period_end: str | None,
+        rows: Iterable[dict],
+    ) -> int:
+        if not period_end:
+            return 0
+        payload = [
+            (company_id, period_end, item.get("maturity_year"), item.get("amount"), item.get("source", "sec_edgar"))
+            for item in rows
+        ]
+        if not payload:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO company_debt_maturities (
+                company_id, period_end, maturity_year, amount, source, computed_at
+            ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(company_id, period_end, maturity_year) DO UPDATE SET
+                amount=excluded.amount,
+                computed_at=CURRENT_TIMESTAMP
+            """,
+            payload,
+        )
+        self.conn.commit()
+        return len(payload)
+
+    def upsert_company_segments(
+        self,
+        company_id: int,
+        period_end: str | None,
+        rows: Iterable[dict],
+    ) -> int:
+        if not period_end:
+            return 0
+        payload = [
+            (
+                company_id,
+                period_end,
+                item.get("segment_name"),
+                item.get("revenue"),
+                item.get("operating_income"),
+                item.get("margin"),
+                item.get("source", "sec_edgar"),
+            )
+            for item in rows
+        ]
+        if not payload:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO company_segments (
+                company_id, period_end, segment_name, revenue, operating_income, margin, source, computed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(company_id, period_end, segment_name) DO UPDATE SET
+                revenue=excluded.revenue,
+                operating_income=excluded.operating_income,
+                margin=excluded.margin,
+                computed_at=CURRENT_TIMESTAMP
+            """,
+            payload,
+        )
+        self.conn.commit()
+        return len(payload)
+
+    def upsert_company_market_data(
+        self,
+        ticker: str,
+        as_of_date: str | None,
+        metric: str,
+        value: float | None,
+        *,
+        source: str,
+    ) -> int:
+        if not as_of_date:
+            return 0
+        self.conn.execute(
+            """
+            INSERT INTO company_market_data (ticker, as_of_date, metric, value, source, fetched_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(ticker, as_of_date, metric) DO UPDATE SET
+                value=excluded.value,
+                source=excluded.source,
+                fetched_at=CURRENT_TIMESTAMP
+            """,
+            (ticker.upper(), as_of_date, metric, value, source),
+        )
+        self.conn.commit()
+        return 1
+
+    def fetch_company_edgar_flags(self, ticker: str) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT f.flag_type, f.filed_date, f.accession, f.details, f.active, f.updated_at
+            FROM company_edgar_flags f
+            JOIN companies c ON c.id = f.company_id
+            WHERE c.ticker = ? AND f.active = 1
+            ORDER BY f.filed_date DESC
+            """,
+            (ticker.upper(),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_company_edgar_events(self, ticker: str, limit: int = 100) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT e.form_type, e.item_number, e.filed_date, e.event_type, e.summary, e.accession
+            FROM company_edgar_events e
+            JOIN companies c ON c.id = e.company_id
+            WHERE c.ticker = ?
+            ORDER BY e.filed_date DESC
+            LIMIT ?
+            """,
+            (ticker.upper(), limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_latest_insider_ownership(self, ticker: str) -> dict | None:
+        row = self.conn.execute(
+            """
+            SELECT o.as_of_date, o.ownership_pct, o.shares_held, o.shares_outstanding, o.computed_at
+            FROM company_insider_ownership o
+            JOIN companies c ON c.id = o.company_id
+            WHERE c.ticker = ?
+            ORDER BY o.as_of_date DESC
+            LIMIT 1
+            """,
+            (ticker.upper(),),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def fetch_company_activist_filings(self, ticker: str, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT a.filed_date, a.form_type, a.accession, a.filer_name, a.ownership_pct, a.summary
+            FROM company_activist_filings a
+            JOIN companies c ON c.id = a.company_id
+            WHERE c.ticker = ?
+            ORDER BY a.filed_date DESC
+            LIMIT ?
+            """,
+            (ticker.upper(), limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_company_debt_maturities(self, ticker: str) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT d.period_end, d.maturity_year, d.amount, d.computed_at
+            FROM company_debt_maturities d
+            JOIN companies c ON c.id = d.company_id
+            WHERE c.ticker = ?
+            ORDER BY d.period_end DESC, d.maturity_year ASC
+            """,
+            (ticker.upper(),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_company_segments(self, ticker: str) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT s.period_end, s.segment_name, s.revenue, s.operating_income, s.margin, s.computed_at
+            FROM company_segments s
+            JOIN companies c ON c.id = s.company_id
+            WHERE c.ticker = ?
+            ORDER BY s.period_end DESC, s.revenue DESC
+            """,
+            (ticker.upper(),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_latest_market_data(self, ticker: str, metric: str) -> dict | None:
+        row = self.conn.execute(
+            """
+            SELECT ticker, as_of_date, metric, value, source, fetched_at
+            FROM company_market_data
+            WHERE ticker = ? AND metric = ?
+            ORDER BY as_of_date DESC
+            LIMIT 1
+            """,
+            (ticker.upper(), metric),
+        ).fetchone()
+        return dict(row) if row else None
