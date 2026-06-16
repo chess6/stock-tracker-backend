@@ -49,19 +49,45 @@ def resolve_ebitda(row: dict) -> float | None:
     return pretax_proxy + abs(interestexp or 0)
 
 
-def gross_profit(row: dict) -> float | None:
-    gp = row.get("gp")
-    if gp is not None:
-        return gp
-    revenue = row.get("revenue")
-    cor = row.get("cor")
+def _coherent_gross_profit(gp, revenue, cor) -> float | None:
+    """Pick gross profit only when SEC revenue / COGS / GrossProfit line items agree."""
+    if revenue is not None and revenue <= 0:
+        return None
+
+    tolerance = 1.02  # minor filing rounding
+
+    if gp is not None and revenue is not None:
+        if 0 <= gp <= revenue * tolerance:
+            return gp
+
     if revenue is not None and cor is not None:
-        return revenue - cor
+        if 0 <= cor <= revenue * tolerance:
+            derived = revenue - cor
+            if derived >= 0:
+                if gp is None or abs(derived - gp) <= max(revenue * 0.05, 1.0):
+                    return derived
+        return None
+
+    if gp is not None and revenue is None:
+        return gp
+
     return None
 
 
+def gross_profit(row: dict) -> float | None:
+    return _coherent_gross_profit(row.get("gp"), row.get("revenue"), row.get("cor"))
+
+
 def gross_margin(row: dict) -> float | None:
-    return safe_div(gross_profit(row), row.get("revenue"))
+    revenue = row.get("revenue")
+    profit = gross_profit(row)
+    margin = safe_div(profit, revenue)
+    if margin is None:
+        return None
+    # Reject impossible margins from mismatched XBRL concepts (e.g. tower REIT segment revenue vs consolidated GP).
+    if margin < -0.5 or margin > 1.0:
+        return None
+    return margin
 
 
 def operating_margin(row: dict) -> float | None:

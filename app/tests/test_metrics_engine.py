@@ -1,6 +1,8 @@
 """Tests for canonical metrics engine and registry."""
 
-from app.services.metric_primitives import gross_margin, operating_margin, total_debt
+import pytest
+
+from app.services.metric_primitives import gross_margin, gross_profit, operating_margin, total_debt
 from app.services.metric_registry import canonical_key
 from app.services.metrics_engine import build_company_metrics, compute_period_metrics
 
@@ -79,5 +81,27 @@ def test_gross_margin_derives_from_cor():
     row = {"revenue": 100.0, "cor": 60.0}
     assert gross_margin(row) == 0.4
     assert operating_margin({"revenue": 100.0, "opinc": 10.0}) == 0.1
+
+
+def test_gross_margin_prefers_tagged_gp_when_coherent():
+    row = {"revenue": 100.0, "cor": 60.0, "gp": 40.0}
+    assert gross_margin(row) == 0.4
+
+
+def test_gross_margin_rejects_gp_above_revenue():
+    """SBAC-style mismatch: tagged GrossProfit with a narrow revenue concept."""
+    row = {"revenue": 244.0, "cor": 691.0, "gp": 2124.0}
+    assert gross_profit(row) is None
+    assert gross_margin(row) is None
+
+
+def test_gross_margin_rejects_cor_above_revenue():
+    row = {"revenue": 100.0, "cor": 150.0}
+    assert gross_margin(row) is None
+
+
+def test_gross_margin_allows_high_software_margins():
+    row = {"revenue": 23_769.0, "cor": 2_551.0, "gp": 21_218.0}
+    assert gross_margin(row) == pytest.approx(21_218.0 / 23_769.0, rel=1e-6)
 
 
