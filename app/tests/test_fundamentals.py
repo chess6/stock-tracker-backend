@@ -788,3 +788,63 @@ def test_get_financials_payload_ary_collapses_interim_periods():
     assert period_ends == ["2012-09-29", "2011-09-24"]
     assert "2012-03-31" not in period_ends
     assert "2011-12-31" not in period_ends
+
+
+def test_history_dimension_for_fetch_maps_mr_to_ar():
+    from app.services.fundamentals import history_dimension_for_fetch
+
+    assert history_dimension_for_fetch("MRY") == "ARY"
+    assert history_dimension_for_fetch("MRQ") == "ARQ"
+    assert history_dimension_for_fetch("ARY") == "ARY"
+
+
+def test_research_ticker_mry_uses_financials_history(client):
+    from app.db import get_db
+    from app.repositories import Repository
+
+    with client.application.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "AAPL", "name": "Apple Inc", "cik": "0000320193"}])
+        company = repo.get_company_by_ticker("AAPL")
+        assert company is not None
+        records = []
+        for narrow in collapse_narrow_fundamentals_rows(
+            _aapl_fy_row("2012-09-29", 2012, 156_000_000_000)
+            + _aapl_fy_row("2011-09-24", 2011, 108_000_000_000),
+            annual=True,
+        ):
+            records.append(
+                {
+                    "company_id": company["id"],
+                    "metric": narrow["metric"],
+                    "value": narrow["value"],
+                    "unit": None,
+                    "period_end": narrow["period_end"],
+                    "period_type": narrow["period_type"],
+                    "dimension": narrow["dimension"],
+                    "fiscal_year": narrow.get("fiscal_year"),
+                    "fiscal_quarter": narrow.get("fiscal_quarter"),
+                    "filing_date": narrow.get("filing_date"),
+                    "form": "10-K",
+                    "accession": "test",
+                    "source": "test",
+                }
+            )
+        repo.upsert_fundamentals(records)
+
+    research = client.get("/api/research/ticker/AAPL?dimension=MRY")
+    assert research.status_code == 200
+    research_ends = [period["periodEnd"] for period in research.get_json()["periods"]]
+    assert research_ends == ["2012-09-29", "2011-09-24"]
+
+    with client.application.app_context():
+        from app.db import get_db
+        from app.repositories import Repository
+        from app.services.fundamentals import get_financials_period_series
+
+        repo = Repository(get_db())
+        shared_ends = [
+            period["periodEnd"]
+            for period in get_financials_period_series(repo, ["AAPL"], dimension="MRY", gte=None).get("AAPL", [])
+        ]
+        assert shared_ends == research_ends

@@ -5,12 +5,10 @@ import logging
 from ..repositories import Repository
 from .fundamentals import (
     RAW_COLUMNS,
-    SNAPSHOT_DIMENSIONS,
     build_company_metrics,
     collapse_narrow_fundamentals_rows,
-    compute_ttm_rows,
     fetch_resolved_wide_rows,
-    normalize_fundamentals_row,
+    get_financials_period_series,
     pivot_fundamentals_rows,
     resolve_financial_dimension,
 )
@@ -128,70 +126,16 @@ class ResearchService:
         if not company:
             return {"ticker": symbol, "error": "not_found"}
 
-        resolved = resolve_financial_dimension(dimension or "MRY", most_recent=False)
-        storage_dimension = resolved["storage_dimension"]
-        ttm_only = bool(resolved["ttm_only"])
-        include_ttm = bool(resolved["include_ttm"])
-        dimension_code = (dimension or "MRY").upper()
-        collapse_annual = dimension_code in {"MRY", "ARY"}
-        collapse_quarterly = dimension_code in {"MRQ", "ARQ"}
-
-        def load_wide_rows(tickers: list[str], *, storage_dim: str | None, annual: bool | None) -> list[dict]:
-            narrow_rows = self.repo.fetch_fundamentals_rows(tickers, gte=gte, dimension=storage_dim)
-            if annual is True:
-                narrow_rows = collapse_narrow_fundamentals_rows(narrow_rows, annual=True)
-            elif annual is False:
-                narrow_rows = collapse_narrow_fundamentals_rows(narrow_rows, annual=False)
-            return pivot_fundamentals_rows(
-                narrow_rows,
-                canonical_annual=True if annual is True else False,
-            )
-
-        if isinstance(storage_dimension, str) and storage_dimension in SNAPSHOT_DIMENSIONS:
-            all_rows = fetch_resolved_wide_rows(self.repo, [symbol], gte=gte, resolved=resolved)
-        elif ttm_only or include_ttm:
-            quarterly_rows = load_wide_rows([symbol], storage_dim="ARQ", annual=False)
-            ttm_rows = compute_ttm_rows(quarterly_rows)
-            all_rows = ttm_rows if ttm_only else ttm_rows + quarterly_rows
-        elif isinstance(storage_dimension, str):
-            all_rows = load_wide_rows(
-                [symbol],
-                storage_dim=storage_dimension,
-                annual=True if collapse_annual else False if collapse_quarterly else None,
-            )
-        else:
-            all_rows = load_wide_rows([symbol], storage_dim="ARY", annual=True) + load_wide_rows(
-                [symbol], storage_dim="ARQ", annual=False
-            )
-
-        all_rows = sorted(
-            all_rows,
-            key=lambda r: (r.get("calendardate") or "", r.get("dimension") or ""),
-            reverse=True,
-        )
+        periods = get_financials_period_series(
+            self.repo,
+            [symbol],
+            dimension=dimension or "MRY",
+            gte=gte,
+        ).get(symbol, [])
 
         price_rows = self.repo.fetch_prices(symbol, limit=260)
         latest_price = price_rows[0]["close"] if price_rows else None
         market_stats = self.prices_service.get_market_stats([symbol]).get(symbol, {})
-
-        periods = []
-        for row in all_rows:
-            row = normalize_fundamentals_row(row)
-            period_end = row.get("calendardate")
-            price_at_period = self._price_near_date(price_rows, period_end)
-            metrics = build_company_metrics(row, price=price_at_period or latest_price)
-            periods.append(
-                {
-                    "periodEnd": period_end,
-                    "dimension": row.get("dimension"),
-                    "periodType": row.get("periodtype"),
-                    "filingDate": row.get("filingdate"),
-                    "fundamentals": {
-                        col["name"]: row.get(col["name"]) for col in RAW_COLUMNS if col["type"] == "double"
-                    },
-                    "metrics": metrics,
-                }
-            )
 
         score_history = self.repo.fetch_company_scores(company["id"], dimension="ARY")
         insiders = self.repo.fetch_insider_transactions(symbol, limit=500)

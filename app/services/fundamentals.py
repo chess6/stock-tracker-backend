@@ -494,6 +494,34 @@ def compute_ttm_rows(wide_rows: list[dict]) -> list[dict]:
     return ttm_rows
 
 
+def history_dimension_for_fetch(dimension: str | None) -> str:
+    """Map MR* snapshot dimensions to as-reported history for multi-period grids."""
+    code = (dimension or "MRY").upper()
+    if code == "MRY":
+        return "ARY"
+    if code == "MRQ":
+        return "ARQ"
+    return code
+
+
+def get_financials_period_series(
+    repo: Repository,
+    tickers: list[str],
+    *,
+    dimension: str | None,
+    gte: str | None,
+) -> dict[str, list]:
+    """Period series with the same collapse/canonical rules as GET /api/financials."""
+    fetch_dim = history_dimension_for_fetch(dimension)
+    payload = FundamentalsService(repo, None).get_financials_payload(
+        tickers,
+        gte,
+        fetch_dim,
+        most_recent=False,
+    )
+    return payload.get("periodSeries") or {}
+
+
 class FundamentalsService:
     def __init__(self, repo: Repository, sec_client) -> None:
         self.repo = repo
