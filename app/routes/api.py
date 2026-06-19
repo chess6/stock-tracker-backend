@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -15,6 +16,8 @@ from ..services.ticker_universes import chunk_tickers, get_universe, get_univers
 
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+_MOVERS_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="movers")
 
 
 def _check_admin_key():
@@ -210,11 +213,17 @@ def tickers_market_stats():
 @api_bp.route("/tickers/movers", methods=["GET"])
 def tickers_movers():
     window = request.args.get("window", "d").lower()
-    if window not in {"d", "w"}:
+    if window not in {"d", "w", "m"}:
         window = "d"
     threshold = request.args.get("threshold", default=10.0, type=float)
     limit = request.args.get("limit", default=50, type=int)
-    movers = get_prices_service().get_movers(window=window, threshold=threshold, limit=limit)
+    app = current_app._get_current_object()
+
+    def load_movers() -> list[dict]:
+        with app.app_context():
+            return get_prices_service().get_movers(window=window, threshold=threshold, limit=limit)
+
+    movers = _MOVERS_EXECUTOR.submit(load_movers).result(timeout=120)
     return jsonify({"movers": movers, "meta": {"window": window, "threshold": threshold, "source": "sqlite"}})
 
 

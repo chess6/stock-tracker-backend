@@ -14,6 +14,9 @@ try:
 except ImportError:  # pragma: no cover
     yf = None
 
+MOVER_WINDOW_OFFSETS = {"d": 1, "w": 5, "m": 21}
+MOVER_CANDIDATE_LIMIT = 500
+
 
 class PricesService:
     def __init__(self, repo: Repository, stooq: StooqClient | None = None) -> None:
@@ -153,11 +156,15 @@ class PricesService:
             stats[symbol] = entry
         return stats
 
-    def get_movers(self, window: str = "d", threshold: float = 10.0, limit: int = 50) -> list[dict]:
-        """Daily or weekly movers exceeding threshold % from cached prices."""
-        offset = 1 if window == "d" else 5
-        candidates = self.repo.fetch_tickers_with_recent_prices(limit=500)
-        batch = self.repo.fetch_prices_batch(candidates, limit_per_ticker=offset + 2)
+    @staticmethod
+    def _build_movers(
+        batch: dict[str, list[dict]],
+        candidates: list[str],
+        offset: int,
+        threshold: float,
+        limit: int,
+        window: str,
+    ) -> list[dict]:
         movers: list[dict] = []
         for ticker in candidates:
             rows = batch.get(ticker, [])
@@ -165,7 +172,7 @@ class PricesService:
                 continue
             latest = rows[0].get("close")
             past = rows[offset].get("close")
-            change = self._pct_change(latest, past)
+            change = PricesService._pct_change(latest, past)
             if change is None or abs(change) < threshold:
                 continue
             movers.append({
@@ -176,3 +183,35 @@ class PricesService:
             })
         movers.sort(key=lambda item: abs(item["change"]), reverse=True)
         return movers[:limit]
+
+    def get_movers(self, window: str = "d", threshold: float = 10.0, limit: int = 50) -> list[dict]:
+        """Daily, weekly, or monthly movers exceeding threshold % from cached prices."""
+        offset = MOVER_WINDOW_OFFSETS.get(window, 1)
+        candidates = self.repo.fetch_tickers_with_recent_prices(limit=MOVER_CANDIDATE_LIMIT)
+        batch = self.repo.fetch_prices_batch(candidates, limit_per_ticker=offset + 2)
+        return self._build_movers(batch, candidates, offset, threshold, limit, window)
+
+    def get_movers_batch(
+        self,
+        threshold: float = 10.0,
+        limit: int = 50,
+        windows: tuple[str, ...] = ("d", "w", "m"),
+    ) -> dict[str, list[dict]]:
+        """Compute multiple mover windows from a single cached-price batch read."""
+        valid_windows = [window for window in windows if window in MOVER_WINDOW_OFFSETS]
+        if not valid_windows:
+            return {}
+        max_offset = max(MOVER_WINDOW_OFFSETS[window] for window in valid_windows)
+        candidates = self.repo.fetch_tickers_with_recent_prices(limit=MOVER_CANDIDATE_LIMIT)
+        batch = self.repo.fetch_prices_batch(candidates, limit_per_ticker=max_offset + 2)
+        return {
+            window: self._build_movers(
+                batch,
+                candidates,
+                MOVER_WINDOW_OFFSETS[window],
+                threshold,
+                limit,
+                window,
+            )
+            for window in valid_windows
+        }
