@@ -32,6 +32,9 @@ class Repository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
+    def commit(self) -> None:
+        retry_on_sqlite_lock(lambda: self.conn.commit(), operation="repository_commit")
+
     def get_config(self, key: str) -> Any | None:
         row = self.conn.execute(
             "SELECT value_json FROM app_config WHERE key = ?",
@@ -55,7 +58,7 @@ class Repository:
             """,
             (key, json.dumps(value)),
         )
-        self.conn.commit()
+        self.commit()
 
     def get_all_config(self) -> dict[str, Any]:
         rows = self.conn.execute("SELECT key, value_json FROM app_config").fetchall()
@@ -339,7 +342,7 @@ class Repository:
             """,
             rows,
         )
-        self.conn.commit()
+        self.commit()
         return len(rows)
 
     def search_companies(self, query: str, limit: int = 10) -> list[dict]:
@@ -395,7 +398,7 @@ class Repository:
                 ticker.upper(),
             ),
         )
-        self.conn.commit()
+        self.commit()
 
     def list_industry_groups(self) -> list[dict]:
         rows = self.conn.execute(
@@ -450,7 +453,7 @@ class Repository:
             """,
             [company_id, *dims],
         )
-        self.conn.commit()
+        self.commit()
         return cursor.rowcount
 
     def count_companies_missing_metadata(self) -> int:
@@ -607,7 +610,7 @@ class Repository:
             """,
             rows,
         )
-        self.conn.commit()
+        self.commit()
         return len(rows)
 
     def fetch_fundamentals_overwrite_state(self, company_id: int) -> dict[tuple, str | None]:
@@ -710,7 +713,7 @@ class Repository:
             """,
             rows,
         )
-        self.conn.commit()
+        self.commit()
         return len(rows)
 
     def fetch_company_scores(self, company_id: int, dimension: str = "ARY") -> list[dict]:
@@ -768,7 +771,7 @@ class Repository:
             """,
             rows,
         )
-        self.conn.commit()
+        self.commit()
         return len(rows)
 
     def fetch_company_ranks_on_or_before_date(
@@ -878,6 +881,311 @@ class Repository:
             history.append(item)
         return list(reversed(history))
 
+    def upsert_research_queue_items(self, records: Iterable[dict]) -> int:
+        import json
+
+        rows = []
+        for record in records:
+            details = record.get("details")
+            rows.append(
+                (
+                    str(record["ticker"]).strip().upper(),
+                    str(record["event_type"]).strip().lower(),
+                    record["event_date"],
+                    int(record.get("priority", 50)),
+                    json.dumps(details) if details is not None else None,
+                    record.get("expires_at"),
+                )
+            )
+        if not rows:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO research_queue (
+                ticker, event_type, event_date, priority, details_json, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, event_type, event_date) DO UPDATE SET
+                priority=excluded.priority,
+                details_json=excluded.details_json,
+                expires_at=excluded.expires_at,
+                dismissed=0
+            """,
+            rows,
+        )
+        self.commit()
+        return len(rows)
+
+    def fetch_research_queue(
+        self,
+        *,
+        limit: int = 50,
+        event_types: list[str] | None = None,
+        dismissed: bool = False,
+    ) -> list[dict]:
+        import json
+
+        clauses = ["dismissed = ?"]
+        params: list[object] = [1 if dismissed else 0]
+        if event_types:
+            normalized = [item.strip().lower() for item in event_types if item and str(item).strip()]
+            if normalized:
+                placeholders = ",".join("?" for _ in normalized)
+                clauses.append(f"event_type IN ({placeholders})")
+                params.extend(normalized)
+        clauses.append(
+            "(expires_at IS NULL OR expires_at = '' OR expires_at > datetime('now'))"
+        )
+        where_sql = " AND ".join(clauses)
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                id,
+                ticker,
+                event_type,
+                event_date,
+                priority,
+                details_json,
+                created_at,
+                expires_at,
+                dismissed
+            FROM research_queue
+            WHERE {where_sql}
+            ORDER BY priority ASC, created_at DESC
+            LIMIT ?
+            """,
+            [*params, max(1, int(limit))],
+        ).fetchall()
+        items = []
+        for row in rows:
+            item = {
+                "id": row["id"],
+                "ticker": row["ticker"],
+                "eventType": row["event_type"],
+                "eventDate": row["event_date"],
+                "priority": row["priority"],
+                "createdAt": row["created_at"],
+                "expiresAt": row["expires_at"],
+                "dismissed": bool(row["dismissed"]),
+            }
+            raw_details = row["details_json"]
+            if raw_details:
+                try:
+                    item["details"] = json.loads(raw_details)
+                except (TypeError, ValueError):
+                    item["details"] = None
+            else:
+                item["details"] = None
+            items.append(item)
+        return items
+
+    def dismiss_research_queue_items(
+        self,
+        ticker: str,
+        *,
+        event_type: str | None = None,
+        event_date: str | None = None,
+    ) -> int:
+        symbol = (ticker or "").strip().upper()
+        if not symbol:
+            return 0
+        clauses = ["ticker = ?", "dismissed = 0"]
+        params: list[object] = [symbol]
+        if event_type:
+            clauses.append("event_type = ?")
+            params.append(event_type.strip().lower())
+        if event_date:
+            clauses.append("event_date = ?")
+            params.append(event_date)
+        cursor = self.conn.execute(
+            f"""
+            UPDATE research_queue
+            SET dismissed = 1
+            WHERE {" AND ".join(clauses)}
+            """,
+            params,
+        )
+        self.commit()
+        return cursor.rowcount
+
+    def fetch_latest_thesis_snapshot(self, company_id: int) -> dict | None:
+        row = self.conn.execute(
+            """
+            SELECT
+                id,
+                company_id,
+                ticker,
+                snapshot_date,
+                thesis_version,
+                pillar_version,
+                scoring_version,
+                gates_json,
+                pillars_json,
+                thesis_json,
+                disqualified,
+                composite_score,
+                computed_at
+            FROM company_thesis_snapshots
+            WHERE company_id = ?
+            ORDER BY computed_at DESC, snapshot_date DESC
+            LIMIT 1
+            """,
+            (company_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def fetch_thesis_drift_history(
+        self,
+        ticker: str,
+        *,
+        composite: str,
+        limit: int = 90,
+    ) -> list[dict]:
+        import json
+
+        rows = self.conn.execute(
+            """
+            SELECT
+                ts.snapshot_date,
+                ts.composite_score,
+                ts.disqualified,
+                ts.gates_json,
+                ts.pillars_json,
+                rs.rank_in_universe,
+                rs.composite_score AS rank_composite_score
+            FROM company_thesis_snapshots ts
+            LEFT JOIN company_rank_snapshots rs
+              ON rs.ticker = ts.ticker
+             AND rs.snapshot_date = ts.snapshot_date
+             AND rs.composite = ?
+            WHERE ts.ticker = ?
+            ORDER BY ts.snapshot_date DESC
+            LIMIT ?
+            """,
+            (
+                composite.strip().lower(),
+                ticker.strip().upper(),
+                max(1, int(limit)),
+            ),
+        ).fetchall()
+
+        history: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            composite_score = item.get("composite_score")
+            if composite_score is None:
+                composite_score = item.pop("rank_composite_score", None)
+            else:
+                item.pop("rank_composite_score", None)
+
+            gates: dict[str, str] = {}
+            raw_gates = item.pop("gates_json", None)
+            if raw_gates:
+                try:
+                    parsed = json.loads(raw_gates) if isinstance(raw_gates, str) else raw_gates
+                    if isinstance(parsed, list):
+                        for gate in parsed:
+                            if isinstance(gate, dict) and gate.get("gate"):
+                                gates[str(gate["gate"])] = str(gate.get("status") or "unknown")
+                    elif isinstance(parsed, dict):
+                        for key, value in parsed.items():
+                            if isinstance(value, dict):
+                                gates[str(key)] = str(value.get("status") or "unknown")
+                            else:
+                                gates[str(key)] = str(value)
+                except (TypeError, ValueError):
+                    gates = {}
+
+            pillar_scores: dict[str, float | None] = {}
+            raw_pillars = item.pop("pillars_json", None)
+            if raw_pillars:
+                try:
+                    parsed = json.loads(raw_pillars) if isinstance(raw_pillars, str) else raw_pillars
+                    if isinstance(parsed, list):
+                        for pillar in parsed:
+                            if isinstance(pillar, dict) and pillar.get("pillar") is not None:
+                                score = pillar.get("score")
+                                pillar_scores[str(pillar["pillar"])] = (
+                                    float(score) if score is not None else None
+                                )
+                    elif isinstance(parsed, dict):
+                        for key, value in parsed.items():
+                            if isinstance(value, dict):
+                                score = value.get("score")
+                                pillar_scores[str(key)] = float(score) if score is not None else None
+                            elif value is not None:
+                                pillar_scores[str(key)] = float(value)
+                except (TypeError, ValueError):
+                    pillar_scores = {}
+
+            history.append({
+                "snapshot_date": item.get("snapshot_date"),
+                "composite_score": composite_score,
+                "rank_in_universe": item.get("rank_in_universe"),
+                "disqualified": bool(item.get("disqualified")),
+                "gates": gates,
+                "pillar_scores": pillar_scores,
+            })
+
+        return list(reversed(history))
+
+    def upsert_thesis_snapshot(self, record: dict) -> int:
+        import json
+
+        gates_json = record.get("gates_json")
+        if gates_json is not None and not isinstance(gates_json, str):
+            gates_json = json.dumps(gates_json)
+        pillars_json = record.get("pillars_json")
+        if pillars_json is not None and not isinstance(pillars_json, str):
+            pillars_json = json.dumps(pillars_json)
+        thesis_json = record.get("thesis_json")
+        if thesis_json is not None and not isinstance(thesis_json, str):
+            thesis_json = json.dumps(thesis_json)
+
+        self.conn.execute(
+            """
+            INSERT INTO company_thesis_snapshots (
+                company_id,
+                ticker,
+                snapshot_date,
+                thesis_version,
+                pillar_version,
+                scoring_version,
+                gates_json,
+                pillars_json,
+                thesis_json,
+                disqualified,
+                composite_score,
+                computed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))
+            ON CONFLICT(company_id, snapshot_date, thesis_version) DO UPDATE SET
+                ticker=excluded.ticker,
+                pillar_version=excluded.pillar_version,
+                scoring_version=excluded.scoring_version,
+                gates_json=excluded.gates_json,
+                pillars_json=excluded.pillars_json,
+                thesis_json=excluded.thesis_json,
+                disqualified=excluded.disqualified,
+                composite_score=excluded.composite_score,
+                computed_at=excluded.computed_at
+            """,
+            (
+                record["company_id"],
+                str(record["ticker"]).strip().upper(),
+                record["snapshot_date"],
+                int(record.get("thesis_version", 1)),
+                int(record.get("pillar_version", 1)),
+                int(record.get("scoring_version", 1)),
+                gates_json,
+                pillars_json,
+                thesis_json,
+                1 if record.get("disqualified") else 0,
+                record.get("composite_score"),
+                record.get("computed_at"),
+            ),
+        )
+        self.commit()
+        return 1
+
     def upsert_company_narrative_snapshots(self, records: Iterable[dict]) -> int:
         import json
 
@@ -910,7 +1218,7 @@ class Repository:
             """,
             rows,
         )
-        self.conn.commit()
+        self.commit()
         return len(rows)
 
     def fetch_narrative_snapshot_history(
@@ -1222,7 +1530,7 @@ class Repository:
             (company_id,),
         )
         if not rows:
-            self.conn.commit()
+            self.commit()
             return 0
         self.conn.executemany(
             """
@@ -1244,7 +1552,7 @@ class Repository:
             """,
             rows,
         )
-        self.conn.commit()
+        self.commit()
         return len(rows)
 
     def fetch_insider_clusters_for_company(self, company_id: int, limit: int = 20) -> list[dict]:
@@ -1342,10 +1650,18 @@ class Repository:
         }
 
     def upsert_feed(self, feed: dict) -> int:
+        import json
+
+        pack_tags = feed.get("pack_tags")
+        if pack_tags is not None and not isinstance(pack_tags, str):
+            pack_tags = json.dumps(pack_tags)
         cursor = self.conn.execute(
             """
-            INSERT INTO feeds (name, feed_url, domain, category, is_active, etag, last_modified, last_polled_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO feeds (
+                name, feed_url, domain, category, is_active, etag, last_modified,
+                last_polled_at, source_weight, enabled_by_default, pack_tags
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(feed_url) DO UPDATE SET
                 name=excluded.name,
                 domain=excluded.domain,
@@ -1354,6 +1670,9 @@ class Repository:
                 etag=COALESCE(excluded.etag, feeds.etag),
                 last_modified=COALESCE(excluded.last_modified, feeds.last_modified),
                 last_polled_at=excluded.last_polled_at,
+                source_weight=COALESCE(excluded.source_weight, feeds.source_weight),
+                enabled_by_default=COALESCE(excluded.enabled_by_default, feeds.enabled_by_default),
+                pack_tags=COALESCE(excluded.pack_tags, feeds.pack_tags),
                 updated_at=CURRENT_TIMESTAMP
             RETURNING id
             """,
@@ -1366,11 +1685,89 @@ class Repository:
                 feed.get("etag"),
                 feed.get("last_modified"),
                 feed.get("last_polled_at", utc_now_iso()),
+                float(feed.get("source_weight", 0.55)),
+                int(bool(feed.get("enabled_by_default", True))),
+                pack_tags,
             ),
         )
         feed_id = cursor.fetchone()[0]
-        self.conn.commit()
+        self.commit()
         return feed_id
+
+    def get_feed_source_weight(self, raw_source: str | None) -> float | None:
+        if not raw_source or not raw_source.startswith("feed:"):
+            return None
+        feed_id = raw_source.split(":", 1)[1]
+        if not feed_id.isdigit():
+            return None
+        row = self.conn.execute(
+            "SELECT source_weight FROM feeds WHERE id = ?",
+            (int(feed_id),),
+        ).fetchone()
+        if row is None or row["source_weight"] is None:
+            return None
+        return float(row["source_weight"])
+
+    def get_enabled_feed_packs(self) -> list[str]:
+        import json
+
+        raw = self.get_config("enabled_feed_packs")
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            return [str(item) for item in raw]
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(item) for item in parsed]
+            except json.JSONDecodeError:
+                return []
+        return []
+
+    def set_enabled_feed_packs(self, packs: list[str]) -> list[str]:
+        import json
+
+        normalized = sorted({pack.strip().lower() for pack in packs if pack and pack.strip()})
+        self.set_config("enabled_feed_packs", normalized)
+        return normalized
+
+    def get_inactive_feed_urls(self) -> set[str]:
+        rows = self.conn.execute(
+            "SELECT feed_url FROM feeds WHERE is_active = 0"
+        ).fetchall()
+        return {row["feed_url"] for row in rows}
+
+    def list_feed_packs(self) -> dict:
+        import json
+
+        from .services.news import DEFAULT_FEEDS, FEED_PACKS
+
+        enabled = set(self.get_enabled_feed_packs())
+        pack_feeds: dict[str, list[dict]] = {pack: [] for pack in FEED_PACKS}
+        for feed in DEFAULT_FEEDS:
+            for pack in feed.get("pack_tags") or []:
+                if pack in pack_feeds:
+                    pack_feeds[pack].append(
+                        {
+                            "name": feed["name"],
+                            "feedUrl": feed["feed_url"],
+                            "enabledByDefault": bool(feed.get("enabled_by_default", True)),
+                            "sourceWeight": feed.get("source_weight", 0.55),
+                        }
+                    )
+        return {
+            "packs": [
+                {
+                    "id": pack,
+                    "enabled": pack in enabled,
+                    "feedCount": len(pack_feeds.get(pack, [])),
+                    "feeds": pack_feeds.get(pack, []),
+                }
+                for pack in FEED_PACKS
+            ],
+            "enabledPacks": sorted(enabled),
+        }
 
     def record_feed_poll(self, feed_id: int, *, success: bool, error_message: str | None = None) -> None:
         now = utc_now_iso()
@@ -1399,7 +1796,7 @@ class Repository:
                 """,
                 (now, (error_message or "unknown error")[:500], feed_id),
             )
-        self.conn.commit()
+        self.commit()
 
     def list_job_runs(self, *, limit: int = 25) -> list[dict]:
         rows = self.conn.execute(
@@ -1511,7 +1908,7 @@ class Repository:
                     (normalized, row["id"]),
                 )
                 updated += 1
-        self.conn.commit()
+        self.commit()
         return updated
 
     def deduplicate_articles(self, lookback: int = 2000) -> dict:
@@ -1588,7 +1985,7 @@ class Repository:
                 marked += 1
             else:
                 canonical.append(article)
-        self.conn.commit()
+        self.commit()
         return {
             "scanned": len(rows),
             "exactDuplicates": exact_dupes,
@@ -1673,7 +2070,7 @@ class Repository:
         )
         article_id = cursor.fetchone()[0]
         if not defer_commit:
-            self.conn.commit()
+            self.commit()
         return article_id
 
     def link_article_company(self, article_id: int, company_id: int, match_type: str, confidence: float, *, defer_commit: bool = False) -> None:
@@ -1720,7 +2117,7 @@ class Repository:
             ),
         )
         if not defer_commit:
-            self.conn.commit()
+            self.commit()
 
     def save_entity_matches(
         self,
@@ -1779,7 +2176,7 @@ class Repository:
                     (article_id,),
                 )
         if not defer_commit:
-            self.conn.commit()
+            self.commit()
         return saved
 
     def copy_article_entity_matches(self, source_article_id: int, target_article_id: int, *, defer_commit: bool = False) -> int:
@@ -1807,7 +2204,7 @@ class Repository:
                 defer_commit=True,
             )
         if not defer_commit:
-            self.conn.commit()
+            self.commit()
         return len(rows)
 
     def upsert_curated_company_aliases(self) -> int:
@@ -1837,7 +2234,7 @@ class Repository:
                     (company["id"], alias, normalized),
                 )
                 updated += 1
-        self.conn.commit()
+        self.commit()
         return updated
 
     def seed_company_aliases(self) -> int:
@@ -1862,7 +2259,7 @@ class Repository:
                 for record in records
             ],
         )
-        self.conn.commit()
+        self.commit()
         return len(records)
 
     def get_alias_index(self) -> dict[str, list[dict]]:
@@ -1918,7 +2315,7 @@ class Repository:
             (article_id, model, content_hash, storage_key, vector_dimensions),
         )
         if not defer_commit:
-            self.conn.commit()
+            self.commit()
 
     def list_unique_articles(
         self,
@@ -1929,6 +2326,8 @@ class Repository:
         category: str | None = None,
         source_domain: str | None = None,
         tickers: list[str] | None = None,
+        divergence_only: bool = False,
+        sort: str = "importance",
     ) -> dict:
         clauses = ["a.duplicate_of_article_id IS NULL"]
         params: list = []
@@ -1942,6 +2341,8 @@ class Repository:
         if source_domain:
             clauses.append("LOWER(a.source_domain) LIKE ?")
             params.append(f"%{source_domain.lower().strip()}%")
+        if divergence_only:
+            clauses.append("a.divergence_context IS NOT NULL AND TRIM(a.divergence_context) != ''")
         if category:
             clauses.append(
                 """
@@ -1974,6 +2375,13 @@ class Repository:
             f"SELECT COUNT(*) FROM articles a WHERE {where_sql}",
             params,
         ).fetchone()[0]
+        if sort == "latest":
+            order_sql = "a.published_at DESC, a.id DESC"
+        else:
+            order_sql = (
+                "COALESCE(a.news_importance_score, a.rank_score) DESC NULLS LAST,"
+                " a.published_at DESC, a.id DESC"
+            )
         ac_display_clause, ac_display_params = _news_display_match_clause("ac")
         rows = self.conn.execute(
             f"""
@@ -1990,6 +2398,9 @@ class Repository:
                 a.vader_compound,
                 a.finbert_label,
                 a.rank_score,
+                a.news_importance_score,
+                a.divergence_context,
+                a.event_cluster_id,
                 a.topic_cluster_id,
                 (
                     SELECT event_type
@@ -2006,7 +2417,7 @@ class Repository:
             LEFT JOIN companies c ON c.id = ac.company_id
             WHERE {where_sql}
             GROUP BY a.id
-            ORDER BY COALESCE(a.rank_score, 0) DESC, a.published_at DESC, a.id DESC
+            ORDER BY {order_sql}
             LIMIT ? OFFSET ?
             """,
             # JOIN display-strategy placeholders precede WHERE params in the SQL text.
@@ -2035,12 +2446,15 @@ class Repository:
                     "finbertLabel": row["finbert_label"],
                     "primaryEvent": row["primary_event"],
                     "rankScore": row["rank_score"],
+                    "newsImportanceScore": row["news_importance_score"] or row["rank_score"],
+                    "divergenceContext": row["divergence_context"],
+                    "eventClusterId": row["event_cluster_id"],
                     "topicCluster": row["topic_cluster_id"],
                     "tickers": tickers,
                     "tickerMatches": ticker_matches,
                 }
             )
-        return {"articles": articles, "total": total, "limit": limit, "offset": offset}
+        return {"articles": articles, "total": total, "limit": limit, "offset": offset, "sort": sort}
 
     def get_company_news(self, ticker: str, limit: int = 25) -> list[dict]:
         display_clause, display_params = _news_display_match_clause("ac")
@@ -2161,7 +2575,7 @@ class Repository:
             """,
             (cache_key, url, status_code, response_body, now, expires_at),
         )
-        self.conn.commit()
+        self.commit()
 
     def upsert_prices(self, ticker: str, rows: Iterable[dict], source: str) -> int:
         fetched_at = utc_now_iso()
@@ -2196,7 +2610,7 @@ class Repository:
             """,
             payload,
         )
-        self.conn.commit()
+        self.commit()
         return len(payload)
 
     def fetch_prices(self, ticker: str, since: str | None = None, limit: int | None = None) -> list[dict]:
@@ -2284,7 +2698,7 @@ class Repository:
             """,
             rows,
         )
-        self.conn.commit()
+        self.commit()
         return len(rows)
 
     def fetch_insider_transactions(self, ticker: str, limit: int = 500) -> list[dict]:
@@ -2438,7 +2852,7 @@ class Repository:
             (name, description),
         )
         wl_id = cursor.fetchone()[0]
-        self.conn.commit()
+        self.commit()
         return wl_id
 
     def add_ticker_to_watchlist(self, watchlist_id: int, ticker: str) -> None:
@@ -2454,7 +2868,7 @@ class Repository:
             "UPDATE watchlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (watchlist_id,),
         )
-        self.conn.commit()
+        self.commit()
 
     def remove_ticker_from_watchlist(self, watchlist_id: int, ticker: str) -> None:
         self.conn.execute(
@@ -2465,7 +2879,7 @@ class Repository:
             "UPDATE watchlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (watchlist_id,),
         )
-        self.conn.commit()
+        self.commit()
 
     def set_watchlist_tickers(self, watchlist_id: int, tickers: list[str]) -> None:
         self.conn.execute(
@@ -2482,7 +2896,77 @@ class Repository:
             "UPDATE watchlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (watchlist_id,),
         )
-        self.conn.commit()
+        self.commit()
+
+    # -- saved screens ------------------------------------------------------
+
+    @staticmethod
+    def _parse_saved_screen_row(row) -> dict:
+        import json
+
+        spec = json.loads(row["spec_json"] or "{}")
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "universe": spec.get("universe", "sp500"),
+            "filterGroups": spec.get("filterGroups", []),
+            "sort": spec.get("sort"),
+            "limit": spec.get("limit", 100),
+            "sourcePresetId": spec.get("sourcePresetId"),
+            "savedAt": row["updated_at"],
+        }
+
+    def list_saved_screens(self) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT id, name, description, spec_json, created_at, updated_at
+            FROM saved_screens
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+        return [self._parse_saved_screen_row(row) for row in rows]
+
+    def upsert_saved_screen(
+        self,
+        screen_id: str,
+        name: str,
+        spec: dict,
+        *,
+        description: str | None = None,
+    ) -> dict:
+        import json
+
+        spec_json = json.dumps(spec, separators=(",", ":"), sort_keys=True)
+        self.conn.execute(
+            """
+            INSERT INTO saved_screens (id, name, description, spec_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = COALESCE(excluded.description, saved_screens.description),
+                spec_json = excluded.spec_json,
+                updated_at = datetime('now')
+            """,
+            (screen_id, name, description, spec_json),
+        )
+        self.commit()
+        row = self.conn.execute(
+            """
+            SELECT id, name, description, spec_json, created_at, updated_at
+            FROM saved_screens
+            WHERE id = ?
+            """,
+            (screen_id,),
+        ).fetchone()
+        return self._parse_saved_screen_row(row)
+
+    def delete_saved_screen(self, screen_id: str) -> bool:
+        cursor = self.conn.execute(
+            "DELETE FROM saved_screens WHERE id = ?",
+            (screen_id,),
+        )
+        self.commit()
+        return cursor.rowcount > 0
 
     def get_company_tags_map(self) -> dict[str, list[str]]:
         rows = self.conn.execute(
@@ -2510,7 +2994,7 @@ class Repository:
                 "INSERT INTO company_tags (ticker, tag) VALUES (?, ?)",
                 rows,
             )
-        self.conn.commit()
+        self.commit()
         return ticker_tags
 
     def set_ticker_company_tags(self, ticker: str, tags: list[str]) -> list[str]:
@@ -2524,7 +3008,7 @@ class Repository:
                 "INSERT INTO company_tags (ticker, tag) VALUES (?, ?)",
                 [(normalized_ticker, tag) for tag in tags],
             )
-        self.conn.commit()
+        self.commit()
         return tags
 
     def _load_ui_prefs_dict(self) -> dict:
@@ -2637,7 +3121,7 @@ class Repository:
             ]
             wl_id = self.upsert_watchlist("Portfolio", description="Default portfolio watchlist")
             self.set_watchlist_tickers(wl_id, normalized)
-        self.conn.commit()
+        self.commit()
         return self.get_user_preferences()
 
     # -- jobs ---------------------------------------------------------------
@@ -2652,7 +3136,7 @@ class Repository:
             (job_type, json.dumps(payload), priority),
         )
         job_id = cursor.fetchone()[0]
-        self.conn.commit()
+        self.commit()
         return job_id
 
     def claim_next_job(self) -> dict | None:
@@ -2676,7 +3160,7 @@ class Repository:
                     RETURNING id, job_type, payload_json, attempt_count
                     """
                 ).fetchone()
-                self.conn.commit()
+                self.commit()
                 return row
             except Exception:
                 self.conn.rollback()
@@ -2693,22 +3177,23 @@ class Repository:
         }
 
     def complete_job(self, job_id: int, status: str = "done", error_message: str | None = None) -> None:
+        now = utc_now_iso()
         self.conn.execute(
             """
             UPDATE ingestion_jobs
-            SET status = ?, updated_at = CURRENT_TIMESTAMP, locked_at = NULL
+            SET status = ?, updated_at = ?, locked_at = NULL
             WHERE id = ?
             """,
-            (status, job_id),
+            (status, now, job_id),
         )
         self.conn.execute(
             """
             INSERT INTO job_runs (job_id, finished_at, status, error_message)
-            VALUES (?, CURRENT_TIMESTAMP, ?, ?)
+            VALUES (?, ?, ?, ?)
             """,
-            (job_id, status, error_message),
+            (job_id, now, status, error_message),
         )
-        self.conn.commit()
+        self.commit()
 
     def get_article_by_id(self, article_id: int) -> dict | None:
         row = self.conn.execute("SELECT * FROM articles WHERE id = ?", (article_id,)).fetchone()
@@ -2747,7 +3232,7 @@ class Repository:
               AND pipeline_status = 'processing'
             """
         )
-        self.conn.commit()
+        self.commit()
         return cursor.rowcount
 
     def get_pipeline_status_counts(self) -> dict:
@@ -2788,7 +3273,7 @@ class Repository:
             """,
             (limit,),
         )
-        self.conn.commit()
+        self.commit()
         return cursor.rowcount
 
     def list_articles_for_retag(
@@ -2881,14 +3366,14 @@ class Repository:
             "UPDATE articles SET pipeline_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (status, article_id),
         )
-        self.conn.commit()
+        self.commit()
 
     def set_article_extraction_status(self, article_id: int, status: str) -> None:
         self.conn.execute(
             "UPDATE articles SET extraction_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (status, article_id),
         )
-        self.conn.commit()
+        self.commit()
 
     def update_article_body(
         self,
@@ -2905,7 +3390,7 @@ class Repository:
             """,
             (body_text, content_hash, article_id),
         )
-        self.conn.commit()
+        self.commit()
 
     def update_article_sentiment(self, article_id: int, sentiment) -> None:
         self.conn.execute(
@@ -2938,7 +3423,7 @@ class Repository:
                 article_id,
             ),
         )
-        self.conn.commit()
+        self.commit()
 
     def update_article_ranking(
         self,
@@ -2947,6 +3432,9 @@ class Repository:
         rank_score: float,
         novelty_score: float | None = None,
         engagement_score: float | None = None,
+        news_importance_score: float | None = None,
+        divergence_context: str | None = None,
+        event_cluster_id: int | None = None,
     ) -> None:
         self.conn.execute(
             """
@@ -2954,12 +3442,220 @@ class Repository:
             SET rank_score = ?,
                 novelty_score = COALESCE(?, novelty_score),
                 engagement_score = COALESCE(?, engagement_score),
+                news_importance_score = COALESCE(?, news_importance_score),
+                divergence_context = COALESCE(?, divergence_context),
+                event_cluster_id = COALESCE(?, event_cluster_id),
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (rank_score, novelty_score, engagement_score, article_id),
+            (
+                rank_score,
+                novelty_score,
+                engagement_score,
+                news_importance_score,
+                divergence_context,
+                event_cluster_id,
+                article_id,
+            ),
         )
-        self.conn.commit()
+        self.commit()
+
+    def get_article_entity_confidence_avg(self, article_id: int) -> float | None:
+        row = self.conn.execute(
+            "SELECT AVG(confidence) AS avg_conf FROM article_company WHERE article_id = ?",
+            (article_id,),
+        ).fetchone()
+        if row is None or row["avg_conf"] is None:
+            return None
+        return float(row["avg_conf"])
+
+    def get_recent_narrative_divergence_for_ticker(
+        self,
+        ticker: str,
+        *,
+        window_days: int = 7,
+    ) -> dict | None:
+        from datetime import date, timedelta
+
+        cutoff = (date.today() - timedelta(days=window_days)).isoformat()
+        row = self.conn.execute(
+            """
+            SELECT divergence_signal, divergence_score, snapshot_date
+            FROM company_narrative_snapshots
+            WHERE ticker = ?
+              AND snapshot_date >= ?
+              AND divergence_signal IN ('rerating_candidate', 'high_conviction', 'risk_flag')
+            ORDER BY snapshot_date DESC, divergence_score DESC
+            LIMIT 1
+            """,
+            (ticker.upper(), cutoff),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_event_clusters(
+        self,
+        *,
+        event_type: str | None = None,
+        hours: int = 72,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        clauses = ["last_seen_at >= ?"]
+        params: list = [cutoff]
+        if event_type:
+            clauses.append("event_type = ?")
+            params.append(event_type)
+        where_sql = " AND ".join(clauses)
+        total = self.conn.execute(
+            f"SELECT COUNT(*) FROM article_event_clusters WHERE {where_sql}",
+            params,
+        ).fetchone()[0]
+        rows = self.conn.execute(
+            f"""
+            SELECT *
+            FROM article_event_clusters
+            WHERE {where_sql}
+            ORDER BY article_count DESC, last_seen_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+        clusters = []
+        for row in rows:
+            domains = []
+            if row["source_domains_json"]:
+                try:
+                    domains = json.loads(row["source_domains_json"])
+                except json.JSONDecodeError:
+                    domains = []
+            clusters.append(
+                {
+                    "id": row["id"],
+                    "eventType": row["event_type"],
+                    "headline": row["headline"],
+                    "firstSeenAt": row["first_seen_at"],
+                    "lastSeenAt": row["last_seen_at"],
+                    "articleCount": row["article_count"],
+                    "sourceCount": row["source_count"],
+                    "sourceDomains": domains,
+                    "consensusSentiment": row["consensus_sentiment"],
+                }
+            )
+        return clusters, int(total)
+
+    def get_event_cluster_members(self, cluster_id: int, *, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT id, title, canonical_url, source_domain, published_at, sentiment_score, rank_score, news_importance_score
+            FROM articles
+            WHERE event_cluster_id = ?
+              AND duplicate_of_article_id IS NULL
+            ORDER BY COALESCE(news_importance_score, rank_score) DESC NULLS LAST, published_at DESC
+            LIMIT ?
+            """,
+            (cluster_id, limit),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "url": row["canonical_url"],
+                "sourceDomain": row["source_domain"],
+                "publishedAt": row["published_at"],
+                "sentimentScore": row["sentiment_score"],
+                "newsImportanceScore": row["news_importance_score"] or row["rank_score"],
+            }
+            for row in rows
+        ]
+
+    def find_recent_event_clusters(
+        self,
+        event_type: str,
+        *,
+        hours: int = 72,
+        limit: int = 100,
+    ) -> list[dict]:
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM article_event_clusters
+            WHERE event_type = ?
+              AND last_seen_at >= ?
+            ORDER BY last_seen_at DESC
+            LIMIT ?
+            """,
+            (event_type, cutoff, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_event_cluster(self, record: dict) -> int:
+        import json
+
+        cursor = self.conn.execute(
+            """
+            INSERT INTO article_event_clusters (
+                event_type, headline, first_seen_at, last_seen_at,
+                article_count, source_count, source_domains_json,
+                consensus_sentiment, centroid_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record["event_type"],
+                record.get("headline"),
+                record.get("first_seen_at"),
+                record.get("last_seen_at"),
+                int(record.get("article_count", 1)),
+                int(record.get("source_count", len(record.get("source_domains") or [])) or 1),
+                json.dumps(record.get("source_domains") or []),
+                record.get("consensus_sentiment"),
+                json.dumps(record.get("centroid") or []),
+            ),
+        )
+        self.commit()
+        return int(cursor.lastrowid)
+
+    def update_event_cluster(self, cluster_id: int, record: dict) -> None:
+        import json
+
+        self.conn.execute(
+            """
+            UPDATE article_event_clusters
+            SET headline = COALESCE(?, headline),
+                last_seen_at = COALESCE(?, last_seen_at),
+                article_count = COALESCE(?, article_count),
+                source_count = COALESCE(?, source_count),
+                source_domains_json = COALESCE(?, source_domains_json),
+                consensus_sentiment = COALESCE(?, consensus_sentiment),
+                centroid_json = COALESCE(?, centroid_json),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                record.get("headline"),
+                record.get("last_seen_at"),
+                record.get("article_count"),
+                record.get("source_count"),
+                json.dumps(record["source_domains"]) if "source_domains" in record else None,
+                record.get("consensus_sentiment"),
+                json.dumps(record["centroid"]) if "centroid" in record else None,
+                cluster_id,
+            ),
+        )
+        self.commit()
+
+    def assign_article_event_cluster(self, article_id: int, cluster_id: int) -> None:
+        self.conn.execute(
+            "UPDATE articles SET event_cluster_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (cluster_id, article_id),
+        )
+        self.commit()
 
     def mark_article_duplicate(self, article_id: int, duplicate_of: int) -> None:
         self.conn.execute(
@@ -2970,7 +3666,7 @@ class Repository:
             """,
             (duplicate_of, article_id),
         )
-        self.conn.commit()
+        self.commit()
 
     def replace_article_events(self, article_id: int, events: list) -> None:
         self.conn.execute(
@@ -2988,7 +3684,7 @@ class Repository:
                 """,
                 [(article_id, e.event_type, e.confidence, e.method) for e in events],
             )
-        self.conn.commit()
+        self.commit()
 
     def replace_article_market_reactions(self, article_id: int, reactions: list) -> None:
         self.conn.execute(
@@ -3019,7 +3715,7 @@ class Repository:
                     for r in reactions
                 ],
             )
-        self.conn.commit()
+        self.commit()
 
     # Embedding storage touchpoint — migration options in docs/SCALING.md (pgvector / FAISS).
     def upsert_article_embedding(
@@ -3055,7 +3751,7 @@ class Repository:
             vector_dimensions=len(vector),
             defer_commit=True,
         )
-        self.conn.commit()
+        self.commit()
 
     def find_embedding_duplicate(
         self,
@@ -3115,7 +3811,7 @@ class Repository:
                 """,
                 (domain, now),
             )
-            self.conn.commit()
+            self.commit()
             return 0
         failures += 1
         backoff_minutes = min(60, 2 ** min(failures, 6))
@@ -3131,7 +3827,7 @@ class Repository:
             """,
             (domain, (row or {}).get("last_fetched_at"), failures, backoff_iso),
         )
-        self.conn.commit()
+        self.commit()
         return failures
 
     def event_reaction_analytics(self, *, limit: int = 20) -> list[dict]:
@@ -3157,6 +3853,7 @@ class Repository:
         row = self.conn.execute("SELECT attempt_count FROM ingestion_jobs WHERE id = ?", (job_id,)).fetchone()
         attempts = (row["attempt_count"] if row else 0) + 1
         status = "failed" if attempts >= 3 else "queued"
+        now = utc_now_iso()
         self.conn.execute(
             """
             UPDATE ingestion_jobs
@@ -3164,19 +3861,19 @@ class Repository:
                 attempt_count = ?,
                 available_at = datetime('now', ?),
                 locked_at = NULL,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = ?
             WHERE id = ?
             """,
-            (status, attempts, f"+{retry_in_minutes} minutes", job_id),
+            (status, attempts, f"+{retry_in_minutes} minutes", now, job_id),
         )
         self.conn.execute(
             """
             INSERT INTO job_runs (job_id, finished_at, status, error_message)
-            VALUES (?, CURRENT_TIMESTAMP, 'error', ?)
+            VALUES (?, ?, 'error', ?)
             """,
-            (job_id, error_message),
+            (job_id, now, error_message),
         )
-        self.conn.commit()
+        self.commit()
 
     def upsert_company_edgar_events(self, company_id: int, events: Iterable[dict]) -> int:
         rows = [
@@ -3205,7 +3902,7 @@ class Repository:
             """,
             rows,
         )
-        self.conn.commit()
+        self.commit()
         return len(rows)
 
     def upsert_company_edgar_flags(self, company_id: int, flags: Iterable[dict]) -> int:
@@ -3236,7 +3933,7 @@ class Repository:
             """,
             rows,
         )
-        self.conn.commit()
+        self.commit()
         return len(rows)
 
     def upsert_company_insider_ownership(self, company_id: int, record: dict) -> int:
@@ -3260,7 +3957,7 @@ class Repository:
                 record.get("source", "sec_edgar"),
             ),
         )
-        self.conn.commit()
+        self.commit()
         return 1
 
     def upsert_company_activist_filings(self, company_id: int, filings: Iterable[dict]) -> int:
@@ -3291,7 +3988,7 @@ class Repository:
             """,
             rows,
         )
-        self.conn.commit()
+        self.commit()
         return len(rows)
 
     def upsert_company_debt_maturities(
@@ -3319,7 +4016,7 @@ class Repository:
             """,
             payload,
         )
-        self.conn.commit()
+        self.commit()
         return len(payload)
 
     def upsert_company_segments(
@@ -3357,7 +4054,7 @@ class Repository:
             """,
             payload,
         )
-        self.conn.commit()
+        self.commit()
         return len(payload)
 
     def upsert_company_market_data(
@@ -3382,7 +4079,7 @@ class Repository:
             """,
             (ticker.upper(), as_of_date, metric, value, source),
         )
-        self.conn.commit()
+        self.commit()
         return 1
 
     def fetch_company_edgar_flags(self, ticker: str) -> list[dict]:

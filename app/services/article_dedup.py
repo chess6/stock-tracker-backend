@@ -49,7 +49,16 @@ _TRACKING_PARAMS = {
     "mc_eid",
     "ref",
     "source",
+    "partner",
+    "cmpid",
 }
+
+
+def _normalize_seeking_alpha_path(path: str) -> str:
+    match = re.match(r"^/article/(\d+)(?:-[^/]+)?/?$", path, flags=re.IGNORECASE)
+    if match:
+        return f"/article/{match.group(1)}"
+    return path
 
 
 def canonicalize_url(url: str | None) -> str | None:
@@ -61,9 +70,13 @@ def canonicalize_url(url: str | None) -> str | None:
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
         if key.lower() not in _TRACKING_PARAMS
     ]
+    path = parsed.path
+    if "seekingalpha.com" in parsed.netloc.lower():
+        path = _normalize_seeking_alpha_path(path)
     normalized = parsed._replace(
         scheme=parsed.scheme.lower(),
         netloc=parsed.netloc.lower(),
+        path=path,
         query=urlencode(query),
         fragment="",
     )

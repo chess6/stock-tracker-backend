@@ -135,6 +135,50 @@ def test_news_feed_returns_unique_articles(app, client):
     assert payload["articles"][0]["tickerMatches"][0]["confidence"] == 0.96
 
 
+def test_news_feed_orders_by_published_at_desc(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        old_id = repo.upsert_article(
+            {
+                "canonical_url": "https://example.com/old-high-rank",
+                "url_hash": "hash-old-rank",
+                "title": "Older semiconductor supply chain report",
+                "summary": "Legacy chip inventory analysis from June",
+                "source_domain": "reuters.com",
+                "published_at": "2025-06-01T12:00:00Z",
+                "fetched_at": "2025-06-01T12:05:00Z",
+                "content_hash": "content-old",
+                "raw_source": "test",
+            },
+            skip_dedup=True,
+        )
+        repo.update_article_ranking(old_id, rank_score=99.0)
+        new_id = repo.upsert_article(
+            {
+                "canonical_url": "https://example.com/new-low-rank",
+                "url_hash": "hash-new-rank",
+                "title": "Fresh cloud infrastructure earnings recap",
+                "summary": "Latest hyperscaler quarterly results roundup",
+                "source_domain": "bbc.co.uk",
+                "published_at": "2025-06-10T12:00:00Z",
+                "fetched_at": "2025-06-10T12:05:00Z",
+                "content_hash": "content-new",
+                "raw_source": "test",
+            },
+            skip_dedup=True,
+        )
+        repo.update_article_ranking(new_id, rank_score=1.0)
+
+    response = client.get("/api/news?limit=10")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 2
+    assert [article["title"] for article in payload["articles"]] == [
+        "Fresh cloud infrastructure earnings recap",
+        "Older semiconductor supply chain report",
+    ]
+
+
 def test_news_feed_search_returns_matching_articles(app, client):
     with app.app_context():
         repo = Repository(get_db())
@@ -225,3 +269,57 @@ def test_preferences_research_pinned_round_trip(client):
         json={"researchPinnedTickers": [f"T{i}" for i in range(25)]},
     )
     assert too_many.status_code == 400
+
+
+def test_saved_screens_crud(client):
+    screen_id = "test-screen-1"
+    payload = {
+        "name": "Deep Value",
+        "universe": "sp500",
+        "filterGroups": [
+            {"op": "AND", "filters": [{"metric": "pb", "op": "lt", "value": 0.7}]},
+        ],
+        "sort": {"metric": "pb", "dir": "asc"},
+        "limit": 50,
+        "sourcePresetId": "deep_value",
+    }
+
+    create_response = client.put(f"/api/screens/{screen_id}", json=payload)
+    assert create_response.status_code == 200
+    created = create_response.get_json()
+    assert created["id"] == screen_id
+    assert created["name"] == "Deep Value"
+    assert created["filterGroups"][0]["filters"][0]["metric"] == "pb"
+
+    list_response = client.get("/api/screens")
+    assert list_response.status_code == 200
+    screens = list_response.get_json()["screens"]
+    assert any(screen["id"] == screen_id for screen in screens)
+
+    update_response = client.put(
+        f"/api/screens/{screen_id}",
+        json={**payload, "name": "Deep Value (updated)"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.get_json()["name"] == "Deep Value (updated)"
+
+    delete_response = client.delete(f"/api/screens/{screen_id}")
+    assert delete_response.status_code == 200
+    assert delete_response.get_json()["deleted"] == screen_id
+
+    missing = client.delete(f"/api/screens/{screen_id}")
+    assert missing.status_code == 404
+
+
+def test_saved_screens_validation(client):
+    bad = client.put("/api/screens/bad-screen", json={"name": "No filters"})
+    assert bad.status_code == 400
+
+    empty_name = client.put(
+        "/api/screens/bad-screen-2",
+        json={
+            "name": "  ",
+            "filterGroups": [{"op": "AND", "filters": [{"metric": "pb", "op": "lt", "value": 1}]}],
+        },
+    )
+    assert empty_name.status_code == 400

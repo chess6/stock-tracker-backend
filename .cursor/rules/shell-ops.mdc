@@ -20,5 +20,6 @@ set -euo pipefail
 | `worker.sh` / `stop_worker.sh` | Background ETL worker |
 | `bootstrap.sh` | POST `/api/admin/bootstrap` — exit 1 on HTTP 4xx/5xx |
 | `refresh_data.sh` | Fundamentals + prices + insiders + feeds |
+| `scripts/capabilities.sh` | Config reference, feature flags (`enable`/`disable`/`env`) |
 
 Logs: `backend.out`, `worker.out`. PID files: `.backend.pid`, `.worker.pid`.

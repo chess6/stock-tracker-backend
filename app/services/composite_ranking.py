@@ -257,6 +257,23 @@ _FACTOR_IMPL: dict[str, _FACTOR_FN] = {
 }
 
 
+def _apply_weight_overrides(
+    preset: dict[str, Any],
+    overrides: dict[str, float] | None,
+) -> dict[str, Any]:
+    if not overrides:
+        return preset
+    known = {key for key, _, _ in preset["factors"]}
+    bad = set(overrides) - known
+    if bad:
+        raise ValueError(f"Unknown factor keys: {bad}")
+    factors = [(k, float(overrides.get(k, w)), i) for k, w, i in preset["factors"]]
+    total = sum(w for _, w, _ in factors)
+    if total <= 0:
+        raise ValueError("Sum of weights must be positive")
+    return {**preset, "factors": [(k, w / total, i) for k, w, i in factors]}
+
+
 def _score_candidate(
     candidate: dict,
     preset: dict[str, Any],
@@ -305,12 +322,18 @@ def run_composite_rank(
     universe: str | None = None,
     tickers: list[str] | None = None,
     limit: int | None = DEFAULT_LIMIT,
+    weight_overrides: dict[str, float] | None = None,
 ) -> tuple[dict | None, int, str | None]:
     composite_key = (composite or "").strip().lower()
-    preset = _COMPOSITE_PRESETS.get(composite_key)
-    if not preset:
+    base_preset = _COMPOSITE_PRESETS.get(composite_key)
+    if not base_preset:
         known = ", ".join(known_composites())
         return None, 400, f"Unknown composite: {composite}. Known: {known}"
+
+    try:
+        preset = _apply_weight_overrides(base_preset, weight_overrides)
+    except ValueError as exc:
+        return None, 400, str(exc)
 
     if limit is not None:
         try:
@@ -396,17 +419,24 @@ def run_composite_rank(
             else:
                 row["rank_delta"] = None
 
+    meta: dict[str, Any] = {
+        "composite": composite_key,
+        "label": preset["label"],
+        "universe": universe_key,
+        "universeSize": len(symbol_list),
+        "evaluated": len(candidates),
+        "scored": len(ranked),
+        "returned": len(results),
+        "limit": limit if limit is not None else len(results),
+    }
+    if weight_overrides:
+        meta["weightOverrides"] = {
+            key: round(weight, 4)
+            for key, weight, _ in preset["factors"]
+        }
+
     return {
-        "meta": {
-            "composite": composite_key,
-            "label": preset["label"],
-            "universe": universe_key,
-            "universeSize": len(symbol_list),
-            "evaluated": len(candidates),
-            "scored": len(ranked),
-            "returned": len(results),
-            "limit": limit if limit is not None else len(results),
-        },
+        "meta": meta,
         "results": results,
     }, 200, None
 
@@ -498,6 +528,51 @@ def get_rank_history(
         return None, 404, "not_found"
 
     history = repo.fetch_company_rank_history(symbol, composite=composite_key, limit=limit)
+    preset = _COMPOSITE_PRESETS[composite_key]
+    return {
+        "meta": {
+            "ticker": symbol,
+            "composite": composite_key,
+            "label": preset["label"],
+            "returned": len(history),
+            "limit": limit,
+        },
+        "history": history,
+    }, 200, None
+
+
+def get_thesis_drift_history(
+    repo: Repository,
+    *,
+    ticker: str,
+    composite: str,
+    limit: int = 90,
+) -> tuple[dict | None, int, str | None]:
+    composite_key = (composite or "").strip().lower()
+    if composite_key not in _COMPOSITE_PRESETS:
+        known = ", ".join(known_composites())
+        return None, 400, f"Unknown composite: {composite}. Known: {known}"
+
+    symbol = (ticker or "").strip().upper()
+    if not symbol:
+        return None, 400, "ticker is required"
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return None, 400, "limit must be an integer"
+    if limit < 1 or limit > 365:
+        return None, 400, "limit must be between 1 and 365"
+
+    company = repo.get_company_by_ticker(symbol)
+    if not company:
+        return None, 404, "not_found"
+
+    history = repo.fetch_thesis_drift_history(
+        symbol,
+        composite=composite_key,
+        limit=limit,
+    )
     preset = _COMPOSITE_PRESETS[composite_key]
     return {
         "meta": {

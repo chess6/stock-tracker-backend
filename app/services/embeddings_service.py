@@ -15,6 +15,10 @@ ALT_MODEL = "bge-small-en-v1.5"
 _model_cache: dict[str, object] = {}
 
 
+class EmbeddingsUnavailableError(RuntimeError):
+    """Raised when embedding-heavy enrichment was requested but the model cannot load."""
+
+
 def _cache_key(model_name: str, device: str) -> str:
     return f"{model_name}::{device}"
 
@@ -25,8 +29,8 @@ def _load_model(model_name: str, *, device: str = "cpu"):
         return _model_cache[key]
     try:
         from sentence_transformers import SentenceTransformer  # type: ignore
-    except ImportError:
-        logger.debug("sentence-transformers not installed")
+    except ImportError as exc:
+        logger.warning("sentence-transformers not installed: %s", exc)
         return None
     try:
         model = SentenceTransformer(model_name, device=device)
@@ -34,8 +38,37 @@ def _load_model(model_name: str, *, device: str = "cpu"):
         logger.info("Loaded embedding model %s on %s", model_name, device)
         return model
     except Exception as exc:
-        logger.warning("Failed to load embedding model %s on %s: %s", model_name, device, exc)
+        logger.error("Failed to load embedding model %s on %s: %s", model_name, device, exc)
         return None
+
+
+def embedding_model_status(
+    model_name: str = DEFAULT_MODEL,
+    *,
+    device: str = "cpu",
+) -> tuple[bool, str | None]:
+    """Return whether the embedding model can load; second value is a user-facing error."""
+    if not model_name.strip():
+        return False, "embedding model name is empty"
+    model = _load_model(model_name, device=device)
+    if model is not None:
+        return True, None
+    return (
+        False,
+        "Embedding model failed to load. Install NLP deps: "
+        "pip install -r requirements-nlp.txt "
+        f"(model={model_name}, device={device})",
+    )
+
+
+def ensure_embedding_model_available(
+    model_name: str = DEFAULT_MODEL,
+    *,
+    device: str = "cpu",
+) -> None:
+    ok, error = embedding_model_status(model_name, device=device)
+    if not ok:
+        raise EmbeddingsUnavailableError(error or "embedding model unavailable")
 
 
 def embed_text(

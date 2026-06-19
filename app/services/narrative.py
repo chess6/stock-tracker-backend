@@ -381,3 +381,72 @@ def build_narrative_analysis(
 
 def clear_narrative_cache() -> None:
     _CACHE.clear()
+
+
+def build_narrative_divergence_alerts(
+    repo: Repository,
+    *,
+    min_divergence: float = 0.6,
+    limit: int = 30,
+    max_age_days: int = 30,
+) -> dict[str, Any]:
+    """Surface tickers with recent narrative/fundamental divergence signals."""
+    cutoff = (datetime.now(timezone.utc).date() - timedelta(days=max_age_days)).isoformat()
+    rows = repo.conn.execute(
+        """
+        SELECT
+            ns.ticker,
+            c.name AS company_name,
+            ns.snapshot_date,
+            ns.divergence_score,
+            ns.divergence_signal
+        FROM company_narrative_snapshots ns
+        LEFT JOIN companies c ON c.ticker = ns.ticker
+        WHERE ns.snapshot_date >= ?
+          AND ns.divergence_signal IN ('rerating_candidate', 'high_conviction', 'risk_flag')
+          AND (
+            ns.divergence_score IS NULL
+            OR ns.divergence_score >= ?
+          )
+        ORDER BY ns.divergence_score DESC, ns.snapshot_date DESC
+        LIMIT ?
+        """,
+        (cutoff, min_divergence, max(limit * 2, limit)),
+    ).fetchall()
+
+    alerts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        ticker = row["ticker"]
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        signal = row["divergence_signal"]
+        score = row["divergence_score"]
+        fundamentals_improving = signal in ("rerating_candidate", "high_conviction")
+        alerts.append({
+            "ticker": ticker,
+            "companyName": row["company_name"],
+            "snapshotDate": row["snapshot_date"],
+            "divergenceScore": float(score) if score is not None else None,
+            "divergenceSignal": signal,
+            "fundamentalsImproving": fundamentals_improving,
+            "negativeSentiment": signal == "risk_flag",
+            "context": (
+                "Fundamentals improving while narrative diverges"
+                if fundamentals_improving
+                else "Negative sentiment divergence"
+            ),
+        })
+        if len(alerts) >= limit:
+            break
+
+    return {
+        "meta": {
+            "returned": len(alerts),
+            "limit": limit,
+            "minDivergence": min_divergence,
+            "maxAgeDays": max_age_days,
+        },
+        "alerts": alerts,
+    }

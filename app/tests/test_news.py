@@ -5,9 +5,12 @@ import requests
 from app.db import get_db
 from app.repositories import Repository
 from app.services.news import (
+    DEFAULT_ACTIVE_FEED_COUNT,
     DEFAULT_FEED_TIMEOUT_SECONDS,
+    DEFAULT_FEEDS,
     DEFAULT_MAX_ARTICLES_PER_FEED,
     NewsService,
+    REMOVED_FEED_NAMES,
 )
 
 
@@ -127,7 +130,7 @@ def test_ingest_default_feeds_continues_after_feed_failure(app, monkeypatch):
             }
         )
         service.session = session
-        monkeypatch.setattr(service, "default_feeds", fake_default_feeds)
+        monkeypatch.setattr(service, "feeds_for_ingest", fake_default_feeds)
 
         payload = service.ingest_default_feeds()
 
@@ -243,12 +246,12 @@ def test_ingest_default_feeds_reports_default_max_articles_per_feed(app, monkeyp
             }
         )
         service.session = session
-        monkeypatch.setattr(service, "default_feeds", fake_default_feeds)
+        monkeypatch.setattr(service, "feeds_for_ingest", fake_default_feeds)
 
         payload = service.ingest_default_feeds(extract_articles=False)
 
         assert payload["maxArticlesPerFeed"] == DEFAULT_MAX_ARTICLES_PER_FEED
-        assert DEFAULT_MAX_ARTICLES_PER_FEED == 25
+        assert DEFAULT_MAX_ARTICLES_PER_FEED == 10
 
 
 def test_ingest_feed_stops_when_per_feed_timeout_elapses(app, monkeypatch):
@@ -340,7 +343,7 @@ def test_ingest_default_feeds_continues_after_feed_timeout(app, monkeypatch):
             }
         )
         service.session = session
-        monkeypatch.setattr(service, "default_feeds", fake_default_feeds)
+        monkeypatch.setattr(service, "feeds_for_ingest", fake_default_feeds)
         # Extra values account for t0 logging calls in ingest_default_feeds + ingest_feed
         times = iter([100.0, 100.0, 100.0, 100.0, 100.0, 250.0, 250.0])
         monkeypatch.setattr("app.services.news.time.monotonic", lambda: next(times, 300.0))
@@ -354,3 +357,46 @@ def test_ingest_default_feeds_continues_after_feed_timeout(app, monkeypatch):
         assert payload["results"][0]["status"] == "timeout"
         assert payload["results"][1]["status"] == "ok"
         assert DEFAULT_FEED_TIMEOUT_SECONDS == 180
+
+
+def test_default_feeds_pruned_and_weighted(app):
+    feed_names = {feed["name"] for feed in DEFAULT_FEEDS}
+    assert REMOVED_FEED_NAMES.isdisjoint(feed_names)
+    assert "SEC 8-K Filings" in feed_names
+    assert "Treasury Press Releases" in feed_names
+    assert DEFAULT_ACTIVE_FEED_COUNT == sum(1 for feed in DEFAULT_FEEDS if feed.get("enabled_by_default", True))
+    assert all("source_weight" in feed for feed in DEFAULT_FEEDS)
+
+
+def test_ingest_feed_persists_source_weight(app):
+    with app.app_context():
+        repo = Repository(get_db())
+        feed_xml = """
+        <rss><channel>
+          <item>
+            <title>Weighted story</title>
+            <link>https://example.com/weighted-story</link>
+            <description>Summary text</description>
+            <pubDate>2025-01-01</pubDate>
+          </item>
+        </channel></rss>
+        """
+        session = FakeSession(
+            {
+                "https://example.com/feed.xml": feed_xml,
+                "https://example.com/weighted-story": "<html><body>Story body</body></html>",
+            }
+        )
+        service = NewsService(repo=repo, session=session, cache_ttl_seconds=10)
+        result = service.ingest_feed(
+            "https://example.com/feed.xml",
+            "Weighted Feed",
+            "finance",
+            source_weight=0.42,
+            extract_articles=False,
+        )
+        row = repo.conn.execute(
+            "SELECT source_weight FROM feeds WHERE id = ?",
+            (result["feedId"],),
+        ).fetchone()
+        assert float(row["source_weight"]) == 0.42

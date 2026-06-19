@@ -5,9 +5,22 @@ from dataclasses import dataclass
 
 from ..repositories import Repository
 from .article_extraction import DomainFetcher, needs_extraction
-from .article_ranking import RankInputs, compute_novelty_score, compute_rank_score
+from .article_cluster import assign_article_to_event_cluster
+from .article_ranking import (
+    RankInputs,
+    compute_news_importance_score,
+    compute_novelty_score,
+    compute_rank_score,
+)
 from .feature_flags import is_enabled
-from .embeddings_service import DEFAULT_MODEL, embed_text, embed_texts_batch, make_embed_fn
+from .embeddings_service import (
+    DEFAULT_MODEL,
+    EmbeddingsUnavailableError,
+    embed_text,
+    embed_texts_batch,
+    ensure_embedding_model_available,
+    make_embed_fn,
+)
 from .event_classification import classify_events
 from .market_reaction import compute_market_reactions
 from .nlp_device import gpu_batch_enabled, torch_device_for_batch
@@ -160,19 +173,50 @@ class ArticlePipeline:
 
         abnormal = reactions[0].abnormal_return_1d if reactions else None
         novelty = compute_novelty_score(max_similarity)
+        feed_source_weight = self.repo.get_feed_source_weight(row.get("raw_source"))
+        entity_confidence = self.repo.get_article_entity_confidence_avg(article_id)
+        divergence_context = None
+        for ticker in tickers:
+            snapshot = self.repo.get_recent_narrative_divergence_for_ticker(ticker)
+            if snapshot:
+                divergence_context = f"{snapshot['divergence_signal']}:{ticker.upper()}"
+                break
+
+        cluster_id = assign_article_to_event_cluster(
+            self.repo,
+            article_id=article_id,
+            event_type=primary_event,
+            headline=row.get("title"),
+            published_at=row.get("published_at"),
+            source_domain=row.get("source_domain"),
+            sentiment_score=sentiment.score,
+            vector=vector,
+        )
+
+        rank_inputs = RankInputs(
+            sentiment_score=sentiment.score,
+            vader_compound=sentiment.vader_compound,
+            source_domain=row.get("source_domain"),
+            novelty_score=novelty,
+            abnormal_return_1d=abnormal,
+            event_confidence=event_confidence,
+            source_weight=feed_source_weight,
+            entity_confidence=entity_confidence,
+            published_at=row.get("published_at"),
+        )
         rank_score = None
+        importance_score = None
         if is_enabled("experimental_composite_rank", self.repo):
-            rank_score = compute_rank_score(
-                RankInputs(
-                    sentiment_score=sentiment.score,
-                    vader_compound=sentiment.vader_compound,
-                    source_domain=row.get("source_domain"),
-                    novelty_score=novelty,
-                    abnormal_return_1d=abnormal,
-                    event_confidence=event_confidence,
-                )
+            rank_score = compute_rank_score(rank_inputs)
+            importance_score = compute_news_importance_score(rank_inputs)
+            self.repo.update_article_ranking(
+                article_id,
+                rank_score=rank_score,
+                novelty_score=novelty,
+                news_importance_score=importance_score,
+                divergence_context=divergence_context,
+                event_cluster_id=cluster_id,
             )
-            self.repo.update_article_ranking(article_id, rank_score=rank_score, novelty_score=novelty)
         self.repo.set_article_pipeline_status(article_id, "complete")
 
         return {
@@ -181,6 +225,8 @@ class ArticlePipeline:
             "sentiment_label": sentiment.label,
             "events": [e.event_type for e in events],
             "rank_score": rank_score,
+            "news_importance_score": importance_score,
+            "event_cluster_id": cluster_id,
             "duplicate_of": dup_id if vector and dup_id else None,
         }
 
@@ -217,6 +263,8 @@ class ArticlePipeline:
 
     def process_batch(self, *, limit: int = 25) -> dict:
         recovered = self.repo.recover_stuck_pipeline_articles()
+        if self.enable_embeddings:
+            ensure_embedding_model_available(self.embedding_model, device="cpu")
         pending = self.repo.list_articles_pending_pipeline(limit=limit)
         pipeline_counts = self.repo.get_pipeline_status_counts()
         if not pending:

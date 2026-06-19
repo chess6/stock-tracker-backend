@@ -12,10 +12,15 @@ if TYPE_CHECKING:
     from ..repositories import Repository
 
 FLAG_DEFAULTS: dict[str, bool] = {
-    "experimental_composite_rank": False,
+    "experimental_composite_rank": True,
     "experimental_research_composite_rank": False,
     "embedding_heavy_retag": False,
     "experimental_signal_ranking": False,
+    "experimental_thesis_versioning": False,
+    "experimental_research_queue": False,
+    "experimental_backtest_route": False,
+    "experimental_insider_alerts": False,
+    "experimental_narrative_alerts": False,
 }
 
 KNOWN_FLAGS = frozenset(FLAG_DEFAULTS)

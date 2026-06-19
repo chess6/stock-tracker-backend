@@ -238,3 +238,93 @@ def format_transaction(txn: dict) -> dict[str, Any]:
         "isBuy": is_buy_transaction(txn.get("transaction_code")),
         "isSell": is_sell_transaction(txn.get("transaction_code")),
     }
+
+
+def _ticker_piotroski_improving(repo, ticker: str) -> tuple[bool, int | None, int | None]:
+    """Return (improving, prior_score, current_score) from latest two ARY periods."""
+    row = repo.conn.execute(
+        """
+        WITH ranked_scores AS (
+            SELECT
+                cs.piotroski_f,
+                ROW_NUMBER() OVER (ORDER BY cs.period_end DESC) AS rn
+            FROM company_scores cs
+            JOIN companies c ON c.id = cs.company_id
+            WHERE c.ticker = ?
+              AND cs.dimension = 'ARY'
+              AND cs.piotroski_f IS NOT NULL
+        )
+        SELECT
+            MAX(CASE WHEN rn = 1 THEN piotroski_f END) AS current_score,
+            MAX(CASE WHEN rn = 2 THEN piotroski_f END) AS prior_score
+        FROM ranked_scores
+        WHERE rn <= 2
+        """,
+        (ticker.strip().upper(),),
+    ).fetchone()
+    if not row:
+        return False, None, None
+    current = row["current_score"]
+    prior = row["prior_score"]
+    if current is None or prior is None:
+        return False, int(prior) if prior is not None else None, int(current) if current is not None else None
+    return int(current) > int(prior), int(prior), int(current)
+
+
+def build_insider_conviction_alerts(
+    repo,
+    *,
+    min_intensity: float = 0.3,
+    window_days: int = 30,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Surface recent insider clusters with optional fundamentals context."""
+    cutoff = (_today() - timedelta(days=window_days)).isoformat()
+    clusters = repo.fetch_insider_cluster_rankings(limit=max(limit * 3, limit))
+    alerts: list[dict[str, Any]] = []
+
+    for cluster in clusters:
+        intensity = float(cluster.get("intensityScore") or 0.0)
+        if intensity < min_intensity:
+            continue
+        window_end = cluster.get("windowEnd") or ""
+        if window_end and window_end < cutoff:
+            continue
+
+        ticker = cluster.get("ticker")
+        if not ticker:
+            continue
+
+        score_improving, prior_score, current_score = _ticker_piotroski_improving(repo, ticker)
+        context_parts = [
+            f"{cluster.get('uniqueBuyers', 0)} buyers in cluster",
+            f"intensity {intensity:.2f}",
+        ]
+        if score_improving and prior_score is not None and current_score is not None:
+            context_parts.append(f"Piotroski {prior_score}→{current_score}")
+
+        alerts.append({
+            "ticker": ticker,
+            "companyName": cluster.get("companyName"),
+            "clusterDetectedAt": window_end or cluster.get("windowStart"),
+            "intensityScore": round(intensity, 4),
+            "uniqueBuyers": cluster.get("uniqueBuyers"),
+            "totalBuyValue": cluster.get("totalBuyValue"),
+            "fundamentalsImproving": score_improving,
+            "scoreImproving": score_improving,
+            "priorPiotroski": prior_score,
+            "currentPiotroski": current_score,
+            "context": "; ".join(context_parts),
+        })
+        if len(alerts) >= limit:
+            break
+
+    return {
+        "meta": {
+            "returned": len(alerts),
+            "limit": limit,
+            "minIntensity": min_intensity,
+            "windowDays": window_days,
+        },
+        "alerts": alerts,
+    }

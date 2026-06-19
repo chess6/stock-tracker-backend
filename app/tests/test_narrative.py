@@ -4,7 +4,7 @@ from datetime import date, timedelta
 
 from app.db import get_db
 from app.repositories import Repository
-from app.services.narrative import build_narrative_analysis, clear_narrative_cache
+from app.services.narrative import build_narrative_analysis, build_narrative_divergence_alerts, clear_narrative_cache
 
 
 def _seed_narrative_fixture(repo: Repository, symbol: str = "AAPL") -> None:
@@ -148,3 +148,28 @@ def test_research_narrative_route_not_found(app, client):
     response = client.get("/api/research/narrative/ZZZZ")
     assert response.status_code == 404
     assert response.get_json()["error"] == "not_found"
+
+
+def test_build_narrative_divergence_alerts_returns_recent_signals(app):
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "NARR", "name": "Narrative Co"}])
+        repo.upsert_company_narrative_snapshots([
+            {
+                "ticker": "NARR",
+                "snapshot_date": date.today().isoformat(),
+                "states": [],
+                "divergence_score": 0.82,
+                "divergence_signal": "rerating_candidate",
+                "emerging_situations": [],
+            }
+        ])
+        payload = build_narrative_divergence_alerts(repo, min_divergence=0.6, limit=10)
+        tickers = [item["ticker"] for item in payload["alerts"]]
+        assert "NARR" in tickers
+
+
+def test_narrative_alerts_route_disabled_without_flag(app, client):
+    response = client.get("/api/research/narrative-alerts")
+    assert response.status_code == 404
+    assert response.get_json()["flag"] == "experimental_narrative_alerts"

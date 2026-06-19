@@ -7,6 +7,8 @@ from datetime import date, timedelta
 from app.db import get_db
 from app.repositories import Repository
 from app.services.composite_ranking import (
+    _COMPOSITE_PRESETS,
+    _apply_weight_overrides,
     approximate_sector_percentile,
     get_rank_history,
     run_composite_rank,
@@ -208,3 +210,126 @@ def test_rerating_candidate_composite_preset(app, client):
     assert payload["meta"]["label"] == "Rerating Candidate"
     factors = {item["key"] for item in payload["results"][0]["factors"]}
     assert "sentiment_divergence" in factors
+
+
+def test_apply_weight_overrides_renormalizes():
+    preset = _COMPOSITE_PRESETS["deep_value"]
+    original_weights = [w for _, w, _ in preset["factors"]]
+    assert abs(sum(original_weights) - 1.0) < 1e-9
+
+    adjusted = _apply_weight_overrides(preset, {"survivability": 0.5, "fcf_quality": 0.5})
+    new_weights = {k: w for k, w, _ in adjusted["factors"]}
+    assert abs(sum(new_weights.values()) - 1.0) < 1e-9
+    assert new_weights["survivability"] > original_weights[1]
+    # Preset dict must not be mutated
+    assert [w for _, w, _ in preset["factors"]] == original_weights
+
+
+def test_apply_weight_overrides_rejects_unknown_keys():
+    preset = _COMPOSITE_PRESETS["deep_value"]
+    try:
+        _apply_weight_overrides(preset, {"nonexistent_factor": 1.0})
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "Unknown factor keys" in str(exc)
+
+
+def test_apply_weight_overrides_rejects_non_positive_sum():
+    preset = _COMPOSITE_PRESETS["deep_value"]
+    zero_overrides = {key: 0.0 for key, _, _ in preset["factors"]}
+    try:
+        _apply_weight_overrides(preset, zero_overrides)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "positive" in str(exc)
+
+
+def test_rank_post_with_weight_overrides(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+
+    response = client.post(
+        "/api/research/rank",
+        json={
+            "composite": "deep_value",
+            "tickers": ["AAPL"],
+            "limit": 5,
+            "weight_overrides": {"survivability": 0.8, "fcf_quality": 0.2},
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["meta"]["composite"] == "deep_value"
+    assert "weightOverrides" in payload["meta"]
+    overrides = payload["meta"]["weightOverrides"]
+    assert abs(sum(overrides.values()) - 1.0) < 1e-4
+    assert overrides["survivability"] > overrides["fcf_quality"]
+
+    row = payload["results"][0]
+    factor_weights = {item["key"]: item["weight"] for item in row["factors"]}
+    if "survivability" in factor_weights:
+        assert abs(factor_weights["survivability"] - overrides["survivability"]) < 1e-4
+    if "fcf_quality" in factor_weights:
+        assert abs(factor_weights["fcf_quality"] - overrides["fcf_quality"]) < 1e-4
+
+
+def test_rank_post_rejects_unknown_weight_key(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        _seed_aapl_fundamentals(repo)
+
+    response = client.post(
+        "/api/research/rank",
+        json={
+            "composite": "deep_value",
+            "tickers": ["AAPL"],
+            "weight_overrides": {"bogus_factor": 1.0},
+        },
+    )
+    assert response.status_code == 400
+    assert "Unknown factor keys" in response.get_json()["error"]
+
+
+def test_thesis_drift_history_route(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "DRFT", "name": "Drift Test Co"}])
+        company = repo.get_company_by_ticker("DRFT")
+        repo.upsert_thesis_snapshot(
+            {
+                "company_id": company["id"],
+                "ticker": "DRFT",
+                "snapshot_date": "2026-06-01",
+                "composite_score": 0.72,
+                "disqualified": 0,
+                "gates_json": [
+                    {"gate": "solvency_runway", "status": "pass"},
+                    {"gate": "margin_of_safety", "status": "fail"},
+                ],
+                "pillars_json": [
+                    {"pillar": "valuation", "score": 0.81},
+                ],
+            }
+        )
+        repo.upsert_company_rank_snapshots([
+            {
+                "ticker": "DRFT",
+                "composite": "deep_value",
+                "snapshot_date": "2026-06-01",
+                "composite_score": 0.72,
+                "rank_in_universe": 8,
+                "factors": [],
+            }
+        ])
+
+    response = client.get("/api/research/rank/thesis-history/DRFT?composite=deep_value&limit=30")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["meta"]["ticker"] == "DRFT"
+    assert len(payload["history"]) == 1
+    point = payload["history"][0]
+    assert point["composite_score"] == 0.72
+    assert point["rank_in_universe"] == 8
+    assert point["gates"]["solvency_runway"] == "pass"
+    assert point["pillar_scores"]["valuation"] == 0.81

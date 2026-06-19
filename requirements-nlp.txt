@@ -1,7 +1,10 @@
-# Optional local NLP models (FinBERT + sentence embeddings). Install when you want
-# finance-specific sentiment and semantic dedup beyond VADER + rule-based events.
-transformers>=4.36
-torch
-sentence-transformers>=2.2
+# Optional local NLP models (FinBERT + sentence embeddings).
+# Pinned for compatibility with torch 2.1.x CUDA wheels common on this project.
+# Install: pip install -r requirements-nlp.txt
+huggingface-hub==0.19.4
+transformers==4.36.2
+tokenizers==0.15.2
+safetensors==0.4.3
+sentence-transformers==2.2.2
 newspaper3k>=0.2.8
 lxml_html_clean>=0.4.0

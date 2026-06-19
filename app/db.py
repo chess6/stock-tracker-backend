@@ -357,6 +357,36 @@ CREATE TABLE IF NOT EXISTS company_narrative_snapshots (
 CREATE INDEX IF NOT EXISTS idx_narrative_snapshots_ticker_date
     ON company_narrative_snapshots(ticker, snapshot_date DESC);
 
+CREATE TABLE IF NOT EXISTS research_queue (
+    id INTEGER PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_date TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 50,
+    details_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT,
+    dismissed INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (ticker, event_type, event_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_research_queue_priority
+    ON research_queue(dismissed, priority, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_research_queue_ticker
+    ON research_queue(ticker, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS saved_screens (
+    id TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    spec_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_screens_updated
+    ON saved_screens(updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS company_edgar_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id INTEGER NOT NULL,
@@ -569,6 +599,9 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         "engagement_score": "REAL",
         "novelty_score": "REAL",
         "extraction_status": "TEXT",
+        "event_cluster_id": "INTEGER",
+        "news_importance_score": "REAL",
+        "divergence_context": "TEXT",
     }
     for column, col_type in article_migrations.items():
         if column not in article_cols:
@@ -579,6 +612,37 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_pipeline_status ON articles(pipeline_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_rank_score ON articles(rank_score DESC)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_articles_news_importance_score ON articles(news_importance_score DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_articles_event_cluster_id ON articles(event_cluster_id)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS article_event_clusters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            headline TEXT,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            article_count INTEGER NOT NULL DEFAULT 1,
+            source_count INTEGER NOT NULL DEFAULT 1,
+            source_domains_json TEXT,
+            consensus_sentiment REAL,
+            centroid_json TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_article_event_clusters_type_seen
+        ON article_event_clusters(event_type, last_seen_at DESC)
+        """
+    )
 
     article_company_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(article_company)").fetchall()
@@ -612,6 +676,9 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         "last_error_at": "TEXT",
         "last_error_message": "TEXT",
         "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+        "source_weight": "REAL DEFAULT 0.55",
+        "enabled_by_default": "INTEGER NOT NULL DEFAULT 1",
+        "pack_tags": "TEXT",
     }
     for column, col_type in feed_migrations.items():
         if column not in feed_cols:
@@ -648,6 +715,14 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE company_scores ADD COLUMN survivability_bucket TEXT")
     if "beneish_components" not in company_scores_cols:
         conn.execute("ALTER TABLE company_scores ADD COLUMN beneish_components TEXT")
+    if "thesis_version" not in company_scores_cols:
+        conn.execute(
+            "ALTER TABLE company_scores ADD COLUMN thesis_version INTEGER NOT NULL DEFAULT 0"
+        )
+    if "pillar_version" not in company_scores_cols:
+        conn.execute(
+            "ALTER TABLE company_scores ADD COLUMN pillar_version INTEGER NOT NULL DEFAULT 0"
+        )
 
     if "enrichment_version" not in article_cols:
         conn.execute(
@@ -737,6 +812,81 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_narrative_snapshots_ticker_date
         ON company_narrative_snapshots(ticker, snapshot_date DESC)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS company_thesis_snapshots (
+            id INTEGER PRIMARY KEY,
+            company_id INTEGER NOT NULL REFERENCES companies(id),
+            ticker TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            thesis_version INTEGER NOT NULL DEFAULT 1,
+            pillar_version INTEGER NOT NULL DEFAULT 1,
+            scoring_version INTEGER NOT NULL DEFAULT 1,
+            gates_json TEXT,
+            pillars_json TEXT,
+            thesis_json TEXT,
+            disqualified INTEGER NOT NULL DEFAULT 0,
+            composite_score REAL,
+            computed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (company_id, snapshot_date, thesis_version)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_thesis_snapshots_ticker_date
+        ON company_thesis_snapshots(ticker, snapshot_date DESC)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS research_queue (
+            id INTEGER PRIMARY KEY,
+            ticker TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_date TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 50,
+            details_json TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT,
+            dismissed INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (ticker, event_type, event_date)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_research_queue_priority
+        ON research_queue(dismissed, priority, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_research_queue_ticker
+        ON research_queue(ticker, created_at DESC)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saved_screens (
+            id TEXT NOT NULL PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            spec_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_saved_screens_updated
+        ON saved_screens(updated_at DESC)
         """
     )
 

@@ -36,66 +36,262 @@ def build_google_news_rss_url(query: str) -> str:
     return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
 
 
+DEFAULT_SOURCE_WEIGHT = 0.55
+
+FEED_PACKS = (
+    "deep_value",
+    "technology",
+    "ai",
+    "semiconductors",
+    "macro",
+    "security",
+    "crypto",
+)
+
+
+def _feed(
+    name: str,
+    feed_url: str,
+    category: str,
+    *,
+    source_weight: float = DEFAULT_SOURCE_WEIGHT,
+    enabled_by_default: bool = True,
+    pack_tags: list[str] | None = None,
+) -> dict:
+    return {
+        "name": name,
+        "feed_url": feed_url,
+        "category": category,
+        "source_weight": source_weight,
+        "enabled_by_default": enabled_by_default,
+        "pack_tags": pack_tags or [],
+    }
+
+
 DEFAULT_FEEDS = [
-    {"name": "BBC Business", "feed_url": "https://feeds.bbci.co.uk/news/business/rss.xml", "category": "finance"},
-    {"name": "NPR Business", "feed_url": "https://feeds.npr.org/1007/rss.xml", "category": "finance"},
-    {"name": "CNBC Top News", "feed_url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114", "category": "finance"},
-    {"name": "MarketWatch Top Stories", "feed_url": "https://feeds.marketwatch.com/marketwatch/topstories/", "category": "finance"},
-    {"name": "Techmeme", "feed_url": "https://www.techmeme.com/feed.xml", "category": "tech"},
-    {"name": "Hacker News Front Page", "feed_url": "https://hnrss.org/frontpage", "category": "tech"},
-    {"name": "Lobsters", "feed_url": "https://lobste.rs/rss", "category": "tech"},
-    {"name": "Semiconductor Engineering", "feed_url": "https://semiengineering.com/feed/", "category": "semis"},
-    {"name": "BleepingComputer", "feed_url": "https://www.bleepingcomputer.com/feed/", "category": "security"},
-    {"name": "AWS Blog", "feed_url": "https://aws.amazon.com/blogs/aws/feed/", "category": "cloud"},
-    {"name": "Cloudflare Blog", "feed_url": "https://blog.cloudflare.com/rss/", "category": "cloud"},
-    {"name": "SEC Press Releases", "feed_url": "https://www.sec.gov/news/pressreleases.rss", "category": "regulatory"},
-    {"name": "Reddit r/stocks", "feed_url": "https://www.reddit.com/r/stocks/.rss", "category": "community"},
-    {"name": "Reddit r/investing", "feed_url": "https://www.reddit.com/r/investing/.rss", "category": "community"},
-    {"name": "Reddit r/SecurityAnalysis", "feed_url": "https://www.reddit.com/r/SecurityAnalysis/.rss", "category": "community"},
-    {"name": "Google News: Stock Market", "feed_url": build_google_news_rss_url("stock market"), "category": "finance"},
-    {"name": "Google News: Semiconductors", "feed_url": build_google_news_rss_url("semiconductor industry"), "category": "semis"},
-    {"name": "Google News: Cloud Computing", "feed_url": build_google_news_rss_url("cloud computing"), "category": "cloud"},
-    {"name": "Google News: Cybersecurity", "feed_url": build_google_news_rss_url("cybersecurity"), "category": "security"},
-    {"name": "Reddit r/options", "feed_url": "https://www.reddit.com/r/options/.rss", "category": "community"},
-    {"name": "Seeking Alpha", "feed_url": "https://seekingalpha.com/feed.xml", "category": "finance"},
-    {"name": "Seeking Alpha Market Currents", "feed_url": "https://seekingalpha.com/market_currents.xml", "category": "finance"},
-    {"name": "CNBC Finance", "feed_url": "https://www.cnbc.com/id/10000664/device/rss/rss.html", "category": "finance"},
-    {"name": "CNBC Investing", "feed_url": "https://www.cnbc.com/id/15839069/device/rss/rss.html", "category": "finance"},
-    {"name": "CNBC Tech", "feed_url": "https://www.cnbc.com/id/19854910/device/rss/rss.html", "category": "tech"},
-    {"name": "Reddit r/wallstreetbets", "feed_url": "https://www.reddit.com/r/wallstreetbets/.rss", "category": "community"},
-    {"name": "Federal Reserve Press Releases", "feed_url": "https://www.federalreserve.gov/feeds/press_all.xml", "category": "regulatory"},
-    {"name": "Federal Reserve Speeches", "feed_url": "https://www.federalreserve.gov/feeds/speeches.xml", "category": "regulatory"},
-    {"name": "Yahoo Finance", "feed_url": "https://finance.yahoo.com/news/rssindex", "category": "finance"},
-    {"name": "MarketWatch MarketPulse", "feed_url": "https://feeds.content.dowjones.io/public/rss/mw_marketpulse", "category": "finance"},
-    {"name": "Benzinga", "feed_url": "https://www.benzinga.com/feed", "category": "finance"},
-    {"name": "BLS Economic Indicators", "feed_url": "https://www.bls.gov/feed/bls_latest.rss", "category": "finance"},
-    {"name": "Ars Technica", "feed_url": "https://feeds.arstechnica.com/arstechnica/index", "category": "tech"},
-    {"name": "TechCrunch", "feed_url": "https://techcrunch.com/feed/", "category": "tech"},
-    {"name": "The Verge", "feed_url": "https://www.theverge.com/rss/index.xml", "category": "tech"},
-    {"name": "EE Times", "feed_url": "https://www.eetimes.com/feed/", "category": "semis"},
-    {"name": "Computer Weekly", "feed_url": "https://www.computerweekly.com/rss/All-Computer-Weekly-content.xml", "category": "tech"},
-    {"name": "Pragmatic Engineer", "feed_url": "https://blog.pragmaticengineer.com/rss/", "category": "tech"},
-    {"name": "Hacker Noon", "feed_url": "https://hackernoon.com/feed", "category": "tech"},
-    {"name": "Hacker News Newest", "feed_url": "https://hnrss.org/newest", "category": "tech"},
-    {"name": "Slashdot", "feed_url": "https://rss.slashdot.org/Slashdot/slashdotMain", "category": "tech"},
-    {"name": "Product Hunt", "feed_url": "https://www.producthunt.com/feed", "category": "tech"},
-    {"name": "ServeTheHome", "feed_url": "https://www.servethehome.com/feed/", "category": "tech"},
-    {"name": "Tom's Hardware", "feed_url": "https://www.tomshardware.com/feeds.xml", "category": "tech"},
-    {"name": "Y Combinator Blog", "feed_url": "https://www.ycombinator.com/blog/rss/", "category": "tech"},
-    {"name": "CoinDesk", "feed_url": "https://www.coindesk.com/arc/outboundfeeds/rss", "category": "crypto"},
-    {"name": "Krebs on Security", "feed_url": "https://krebsonsecurity.com/feed/", "category": "security"},
-    {"name": "Dark Reading", "feed_url": "https://www.darkreading.com/rss.xml", "category": "security"},
-    {"name": "Ben's Bites", "feed_url": "https://www.bensbites.com/feed", "category": "ai"},
-    {"name": "Google AI Blog", "feed_url": "https://blog.google/innovation-and-ai/technology/ai/rss/", "category": "ai"},
-    {"name": "Import AI", "feed_url": "https://importai.substack.com/feed", "category": "ai"},
-    {"name": "AI Wire", "feed_url": "https://www.hpcwire.com/aiwire/feed/", "category": "ai"},
-    {"name": "TLDR AI", "feed_url": "https://tldr.tech/api/rss/ai", "category": "ai"},
+    _feed("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml", "finance", source_weight=0.70, pack_tags=["macro"]),
+    _feed("NPR Business", "https://feeds.npr.org/1007/rss.xml", "finance", source_weight=0.70, pack_tags=["macro"]),
+    _feed(
+        "CNBC Top News",
+        "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
+        "finance",
+        source_weight=0.80,
+        pack_tags=["deep_value"],
+    ),
+    _feed(
+        "MarketWatch Top Stories",
+        "https://feeds.marketwatch.com/marketwatch/topstories/",
+        "finance",
+        source_weight=0.80,
+        pack_tags=["deep_value"],
+    ),
+    _feed("Techmeme", "https://www.techmeme.com/feed.xml", "tech", source_weight=0.65, pack_tags=["technology"]),
+    _feed("Hacker News Front Page", "https://hnrss.org/frontpage", "tech", source_weight=0.55, pack_tags=["technology"]),
+    _feed(
+        "Semiconductor Engineering",
+        "https://semiengineering.com/feed/",
+        "semis",
+        source_weight=0.75,
+        pack_tags=["semiconductors", "technology"],
+    ),
+    _feed("BleepingComputer", "https://www.bleepingcomputer.com/feed/", "security", source_weight=0.65, pack_tags=["security"]),
+    _feed("AWS Blog", "https://aws.amazon.com/blogs/aws/feed/", "cloud", source_weight=0.60, pack_tags=["technology"]),
+    _feed("Cloudflare Blog", "https://blog.cloudflare.com/rss/", "cloud", source_weight=0.60, pack_tags=["technology"]),
+    _feed(
+        "SEC Press Releases",
+        "https://www.sec.gov/news/pressreleases.rss",
+        "regulatory",
+        source_weight=1.0,
+        pack_tags=["deep_value", "macro"],
+    ),
+    _feed(
+        "SEC 8-K Filings",
+        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-k&owner=include&count=40&output=atom",
+        "regulatory",
+        source_weight=1.0,
+        pack_tags=["deep_value"],
+    ),
+    _feed(
+        "SEC 13D Activist Filings",
+        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=sc%2013d&owner=include&count=40&output=atom",
+        "regulatory",
+        source_weight=1.0,
+        pack_tags=["deep_value"],
+    ),
+    _feed("Reddit r/stocks", "https://www.reddit.com/r/stocks/.rss", "community", source_weight=0.45, pack_tags=["deep_value"]),
+    _feed("Reddit r/investing", "https://www.reddit.com/r/investing/.rss", "community", source_weight=0.45, pack_tags=["deep_value"]),
+    _feed(
+        "Reddit r/SecurityAnalysis",
+        "https://www.reddit.com/r/SecurityAnalysis/.rss",
+        "community",
+        source_weight=0.60,
+        pack_tags=["deep_value"],
+    ),
+    _feed(
+        "Google News: Stock Market",
+        build_google_news_rss_url("stock market"),
+        "finance",
+        source_weight=0.65,
+        pack_tags=["deep_value"],
+    ),
+    _feed(
+        "Google News: Semiconductors",
+        build_google_news_rss_url("semiconductor industry"),
+        "semis",
+        source_weight=0.65,
+        pack_tags=["semiconductors"],
+    ),
+    _feed(
+        "Google News: Cloud Computing",
+        build_google_news_rss_url("cloud computing"),
+        "cloud",
+        source_weight=0.60,
+        pack_tags=["technology"],
+    ),
+    _feed(
+        "Google News: Cybersecurity",
+        build_google_news_rss_url("cybersecurity"),
+        "security",
+        source_weight=0.65,
+        pack_tags=["security"],
+    ),
+    _feed(
+        "Reddit r/options",
+        "https://www.reddit.com/r/options/.rss",
+        "community",
+        source_weight=0.35,
+        enabled_by_default=False,
+        pack_tags=["deep_value"],
+    ),
+    _feed("Seeking Alpha", "https://seekingalpha.com/feed.xml", "finance", source_weight=0.70, pack_tags=["deep_value"]),
+    _feed(
+        "Seeking Alpha Market Currents",
+        "https://seekingalpha.com/market_currents.xml",
+        "finance",
+        source_weight=0.85,
+        pack_tags=["deep_value"],
+    ),
+    _feed(
+        "CNBC Tech",
+        "https://www.cnbc.com/id/19854910/device/rss/rss.html",
+        "tech",
+        source_weight=0.75,
+        pack_tags=["technology"],
+    ),
+    _feed(
+        "Reddit r/wallstreetbets",
+        "https://www.reddit.com/r/wallstreetbets/.rss",
+        "community",
+        source_weight=0.10,
+        pack_tags=["deep_value"],
+    ),
+    _feed(
+        "Federal Reserve Press Releases",
+        "https://www.federalreserve.gov/feeds/press_all.xml",
+        "regulatory",
+        source_weight=1.0,
+        pack_tags=["macro"],
+    ),
+    _feed(
+        "Federal Reserve Speeches",
+        "https://www.federalreserve.gov/feeds/speeches.xml",
+        "regulatory",
+        source_weight=1.0,
+        pack_tags=["macro"],
+    ),
+    _feed("Yahoo Finance", "https://finance.yahoo.com/news/rssindex", "finance", source_weight=0.75, pack_tags=["deep_value"]),
+    _feed(
+        "MarketWatch MarketPulse",
+        "https://feeds.content.dowjones.io/public/rss/mw_marketpulse",
+        "finance",
+        source_weight=0.75,
+        enabled_by_default=False,
+        pack_tags=["deep_value"],
+    ),
+    _feed("Benzinga", "https://www.benzinga.com/feed", "finance", source_weight=0.80, pack_tags=["deep_value"]),
+    _feed(
+        "BLS Economic Indicators",
+        "https://www.bls.gov/feed/bls_latest.rss",
+        "finance",
+        source_weight=0.95,
+        pack_tags=["macro"],
+    ),
+    _feed(
+        "Treasury Press Releases",
+        "https://home.treasury.gov/system/files/136/TreasuryPressReleases.xml",
+        "regulatory",
+        source_weight=1.0,
+        pack_tags=["macro"],
+    ),
+    _feed(
+        "FRED Economic Releases",
+        "https://fred.stlouisfed.org/feeds/releases.xml",
+        "regulatory",
+        source_weight=0.95,
+        pack_tags=["macro"],
+    ),
+    _feed("Ars Technica", "https://feeds.arstechnica.com/arstechnica/index", "tech", source_weight=0.70, pack_tags=["technology"]),
+    _feed("TechCrunch", "https://techcrunch.com/feed/", "tech", source_weight=0.65, pack_tags=["technology"]),
+    _feed("The Verge", "https://www.theverge.com/rss/index.xml", "tech", source_weight=0.60, pack_tags=["technology"]),
+    _feed("EE Times", "https://www.eetimes.com/feed/", "semis", source_weight=0.70, pack_tags=["semiconductors"]),
+    _feed(
+        "Pragmatic Engineer",
+        "https://blog.pragmaticengineer.com/rss/",
+        "tech",
+        source_weight=0.55,
+        enabled_by_default=False,
+        pack_tags=["technology"],
+    ),
+    _feed("ServeTheHome", "https://www.servethehome.com/feed/", "tech", source_weight=0.60, pack_tags=["technology", "semiconductors"]),
+    _feed("Tom's Hardware", "https://www.tomshardware.com/feeds.xml", "tech", source_weight=0.60, pack_tags=["technology", "semiconductors"]),
+    _feed(
+        "Y Combinator Blog",
+        "https://www.ycombinator.com/blog/rss/",
+        "tech",
+        source_weight=0.50,
+        enabled_by_default=False,
+        pack_tags=["technology"],
+    ),
+    _feed(
+        "CoinDesk",
+        "https://www.coindesk.com/arc/outboundfeeds/rss",
+        "crypto",
+        source_weight=0.55,
+        enabled_by_default=False,
+        pack_tags=["crypto"],
+    ),
+    _feed("Krebs on Security", "https://krebsonsecurity.com/feed/", "security", source_weight=0.70, pack_tags=["security"]),
+    _feed("Dark Reading", "https://www.darkreading.com/rss.xml", "security", source_weight=0.65, pack_tags=["security"]),
+    _feed("Ben's Bites", "https://www.bensbites.com/feed", "ai", source_weight=0.60, pack_tags=["ai"]),
+    _feed(
+        "Google AI Blog",
+        "https://blog.google/innovation-and-ai/technology/ai/rss/",
+        "ai",
+        source_weight=0.65,
+        pack_tags=["ai"],
+    ),
+    _feed("Import AI", "https://importai.substack.com/feed", "ai", source_weight=0.60, pack_tags=["ai"]),
+    _feed("AI Wire", "https://www.hpcwire.com/aiwire/feed/", "ai", source_weight=0.55, pack_tags=["ai"]),
+    _feed("TLDR AI", "https://tldr.tech/api/rss/ai", "ai", source_weight=0.55, pack_tags=["ai"]),
 ]
+
+REMOVED_FEED_NAMES = frozenset({
+    "Lobsters",
+    "Hacker Noon",
+    "Product Hunt",
+    "Slashdot",
+    "Computer Weekly",
+    "CNBC Finance",
+    "CNBC Investing",
+    "Hacker News Newest",
+})
+
+DEFAULT_ACTIVE_FEED_COUNT = sum(1 for feed in DEFAULT_FEEDS if feed.get("enabled_by_default", True))
 
 # Cap wall-clock time per feed so one slow source cannot block the full ingest run.
 DEFAULT_FEED_TIMEOUT_SECONDS = 180
 # Cap articles per feed so high-volume RSS sources (Reddit, Google News) do not dominate ingest.
-DEFAULT_MAX_ARTICLES_PER_FEED = 25
+DEFAULT_MAX_ARTICLES_PER_FEED = 10
 
 
 class _HTMLStripper(HTMLParser):
@@ -219,9 +415,29 @@ class NewsService:
         feed_timeout_seconds: float | None = None,
         skip_dedup: bool = False,
         skip_events: bool = False,
+        source_weight: float | None = None,
+        enabled_by_default: bool | None = None,
+        pack_tags: list[str] | None = None,
         _companies_cache: list[dict] | None = None,
         _prefetched_body: str | None = None,
     ) -> dict:
+        feed_meta = {
+            "source_weight": source_weight if source_weight is not None else DEFAULT_SOURCE_WEIGHT,
+            "enabled_by_default": True if enabled_by_default is None else enabled_by_default,
+            "pack_tags": pack_tags or [],
+        }
+
+        def _feed_payload() -> dict:
+            return {
+                "name": name,
+                "feed_url": feed_url,
+                "domain": urlparse(feed_url).netloc,
+                "category": category,
+                "last_polled_at": utc_now_iso(),
+                "source_weight": feed_meta["source_weight"],
+                "enabled_by_default": feed_meta["enabled_by_default"],
+                "pack_tags": feed_meta["pack_tags"],
+            }
         deadline = None
         if feed_timeout_seconds is not None and feed_timeout_seconds > 0:
             deadline = time.monotonic() + feed_timeout_seconds
@@ -238,28 +454,12 @@ class NewsService:
             feed_body = self._fetch_cached_text(feed_url, "feed", force_refresh=force_refresh)
         if _timed_out():
             logger.warning("ingest_feed timeout before parsing name=%r", name)
-            feed_id = self.repo.upsert_feed(
-                {
-                    "name": name,
-                    "feed_url": feed_url,
-                    "domain": urlparse(feed_url).netloc,
-                    "category": category,
-                    "last_polled_at": utc_now_iso(),
-                }
-            )
+            feed_id = self.repo.upsert_feed(_feed_payload())
             return {"feedId": feed_id, "articlesProcessed": 0, "timedOut": True}
         entries = parse_feed(feed_body)
         if max_articles is not None and max_articles > 0:
             entries = entries[:max_articles]
-        feed_id = self.repo.upsert_feed(
-            {
-                "name": name,
-                "feed_url": feed_url,
-                "domain": urlparse(feed_url).netloc,
-                "category": category,
-                "last_polled_at": utc_now_iso(),
-            }
-        )
+        feed_id = self.repo.upsert_feed(_feed_payload())
         companies = _companies_cache or self.repo.list_companies_for_matching()
         batch_mode = skip_dedup and skip_events
         article_count = 0
@@ -335,6 +535,21 @@ class NewsService:
     def default_feeds(self) -> list[dict]:
         return list(DEFAULT_FEEDS)
 
+    def feeds_for_ingest(self) -> list[dict]:
+        enabled_packs = set(self.repo.get_enabled_feed_packs())
+        selected: list[dict] = []
+        for feed in DEFAULT_FEEDS:
+            if feed.get("enabled_by_default", True):
+                selected.append(feed)
+                continue
+            pack_tags = feed.get("pack_tags") or []
+            if enabled_packs and any(tag in enabled_packs for tag in pack_tags):
+                selected.append(feed)
+        inactive_urls = self.repo.get_inactive_feed_urls()
+        if inactive_urls:
+            selected = [feed for feed in selected if feed["feed_url"] not in inactive_urls]
+        return selected
+
     def _prefetch_feeds(
         self,
         feed_list: list[dict],
@@ -375,7 +590,7 @@ class NewsService:
         feed_timeout_seconds: float = DEFAULT_FEED_TIMEOUT_SECONDS,
         tickers: list[str] | None = None,
     ) -> dict:
-        feed_list = self.default_feeds()
+        feed_list = self.feeds_for_ingest()
         logger.info("ingest_default_feeds start feeds=%d extract=%s max_per_feed=%s timeout=%gs tickers=%s",
                     len(feed_list), extract_articles, max_articles_per_feed, feed_timeout_seconds,
                     len(tickers) if tickers else "all")
@@ -415,6 +630,9 @@ class NewsService:
                     feed_timeout_seconds=feed_timeout_seconds,
                     skip_dedup=True,
                     skip_events=True,
+                    source_weight=feed.get("source_weight"),
+                    enabled_by_default=feed.get("enabled_by_default", True),
+                    pack_tags=feed.get("pack_tags"),
                     _companies_cache=companies,
                     _prefetched_body=prefetched.get(feed["feed_url"]),
                 )

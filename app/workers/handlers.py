@@ -74,6 +74,16 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
             snapshot_date=payload.get("snapshot_date"),
         )
 
+    def build_research_queue_job(payload: dict) -> dict:
+        from ..services.feature_flags import is_enabled
+        from ..services.research_queue import build_research_queue as run_build
+
+        if not is_enabled("experimental_research_queue", ctx.repo):
+            return {"skipped": True, "reason": "feature_flag_disabled"}
+        limit = int(payload.get("limit", 50))
+        max_age_days = int(payload.get("max_age_days", 30))
+        return run_build(ctx.repo, limit=limit, max_age_days=max_age_days)
+
     def pipeline_refresh(payload: dict) -> dict:
         from ..services.pipeline_refresh import PipelineRefreshService
 
@@ -193,7 +203,7 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         tickers = payload.get("tickers") or ctx.default_tickers
         companies = sync_companies({})
         fundamentals = refresh_fundamentals({"tickers": tickers})
-        feeds = ingest_default_feeds({"extract_articles": False, "max_articles_per_feed": 25})
+        feeds = ingest_default_feeds({"extract_articles": False, "max_articles_per_feed": 10})
         prices = refresh_prices({"tickers": tickers})
         insiders = refresh_insiders({"tickers": tickers})
         return {
@@ -205,11 +215,54 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
             "tickers": tickers,
         }
 
+    def cluster_articles(payload: dict) -> dict:
+        from ..services.article_cluster import assign_article_to_event_cluster
+        from ..services.embeddings_service import DEFAULT_MODEL, vector_from_json
+
+        limit = int(payload.get("limit", 100))
+        rows = ctx.repo.conn.execute(
+            """
+            SELECT a.id, a.title, a.published_at, a.source_domain, a.sentiment_score, aev.vector_json,
+                   (
+                       SELECT event_type
+                       FROM article_event_classifications ec
+                       WHERE ec.article_id = a.id
+                       ORDER BY ec.confidence DESC
+                       LIMIT 1
+                   ) AS primary_event
+            FROM articles a
+            JOIN article_embedding_vectors aev ON aev.article_id = a.id AND aev.model = ?
+            WHERE a.event_cluster_id IS NULL
+              AND a.duplicate_of_article_id IS NULL
+              AND a.pipeline_status = 'complete'
+            ORDER BY a.published_at DESC
+            LIMIT ?
+            """,
+            (DEFAULT_MODEL, limit),
+        ).fetchall()
+        assigned = 0
+        for row in rows:
+            vector = vector_from_json(row["vector_json"])
+            cluster_id = assign_article_to_event_cluster(
+                ctx.repo,
+                article_id=row["id"],
+                event_type=row["primary_event"],
+                headline=row["title"],
+                published_at=row["published_at"],
+                source_domain=row["source_domain"],
+                sentiment_score=row["sentiment_score"],
+                vector=vector,
+            )
+            if cluster_id:
+                assigned += 1
+        return {"scanned": len(rows), "assigned": assigned}
+
     return {
         "sync_companies": sync_companies,
         "refresh_fundamentals": refresh_fundamentals,
         "refresh_company_scores": refresh_company_scores,
         "snapshot_composite_ranks": snapshot_composite_ranks,
+        "build_research_queue": build_research_queue_job,
         "snapshot_narrative_intelligence": snapshot_narrative_intelligence,
         "pipeline_refresh": pipeline_refresh,
         "enrich_metadata": enrich_metadata,
@@ -222,6 +275,7 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         "refresh_short_interest": refresh_short_interest,
         "extract_articles": extract_articles,
         "enrich_articles": enrich_articles,
+        "cluster_articles": cluster_articles,
         "bootstrap": bootstrap,
     }
 

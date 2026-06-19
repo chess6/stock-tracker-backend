@@ -48,6 +48,7 @@ else
   PHASE="enrich"
 fi
 RETAG_OFFSET=0
+FORCE_REQUEUE_DONE=0
 
 build_json_payload() {
   local payload
@@ -70,11 +71,13 @@ build_json_payload() {
       payload+=", \"retag_all\": true"
     fi
     payload+=", \"offset\": ${RETAG_OFFSET}"
-  elif [ "$FORCE" = "1" ]; then
-    payload+=", \"force\": true"
   fi
   payload+="}"
   printf '%s' "$payload"
+}
+
+build_requeue_payload() {
+  printf '{"requeue_completed": true, "requeue_only": true, "enable_finbert": false, "enable_embeddings": false}'
 }
 
 build_request_url() {
@@ -89,10 +92,35 @@ build_request_url() {
     return
   fi
   local url="${BASE_URL}/api/admin/enrich-articles?limit=${BATCH}"
-  if [ "$FORCE" = "1" ]; then
-    url+="&force=true"
-  fi
   printf '%s' "$url"
+}
+
+bulk_requeue_completed() {
+  local requeue_limit="${REQUEUE_LIMIT:-500}"
+  local total_requeued=0
+  echo "Requeueing completed articles in chunks of ${requeue_limit}..."
+  while true; do
+    local http_code
+    http_code="$(curl "${curl_args[@]}" \
+      "${BASE_URL}/api/admin/enrich-articles?limit=${BATCH}&requeueLimit=${requeue_limit}" \
+      -d "$(build_requeue_payload)")"
+    if [ "$http_code" -ge 400 ]; then
+      echo "Requeue failed (HTTP ${http_code}):" >&2
+      cat "$RESPONSE_FILE" >&2
+      exit 1
+    fi
+    local requeued
+    requeued="$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("requeued", 0) or 0))' "$RESPONSE_FILE")"
+    requeued=${requeued:-0}
+    total_requeued=$((total_requeued + requeued))
+    echo "  requeued=${requeued} (total ${total_requeued})"
+    if [ "$requeued" -le 0 ]; then
+      break
+    fi
+    sleep "$SLEEP_SECONDS"
+  done
+  FORCE_REQUEUE_DONE=1
+  echo "Force requeue complete (${total_requeued} articles returned to pending)."
 }
 
 check_api_features() {
@@ -103,13 +131,17 @@ check_api_features() {
     exit 1
   fi
   python3 -c '
-import json, sys
+import json, os, sys
 payload = json.load(open(sys.argv[1]))
 features = payload.get("api_features") or {}
 if not features.get("retag_endpoint"):
     print("missing")
-else:
-    print("ok")
+    sys.exit(0)
+if os.environ.get("CHECK_EMBEDDINGS", "0") == "1" and not payload.get("embeddings_available"):
+    err = payload.get("embeddings_error") or "embeddings unavailable"
+    print("embeddings:" + err)
+    sys.exit(0)
+print("ok")
 ' "$RESPONSE_FILE"
 }
 
@@ -161,11 +193,27 @@ else
 fi
 echo
 
-if [ "$(check_api_features)" != "ok" ]; then
+if [ "$ENABLE_EMBEDDINGS" = "true" ]; then
+  CHECK_EMBEDDINGS=1 feature_status="$(check_api_features)"
+else
+  feature_status="$(check_api_features)"
+fi
+if [ "$feature_status" = "missing" ]; then
   echo "Backend is running old code without the retag endpoint." >&2
   echo "Restart it, then rerun this script:" >&2
   echo "  ./restart.sh" >&2
   exit 1
+fi
+if [[ "$feature_status" == embeddings:* ]]; then
+  echo "${feature_status#embeddings:}" >&2
+  echo "Install NLP dependencies, restart the backend, then rerun:" >&2
+  echo "  pip install -r requirements-nlp.txt" >&2
+  echo "  ./restart.sh" >&2
+  exit 1
+fi
+
+if [ "$FORCE" = "1" ] && [ "$PHASE" = "enrich" ]; then
+  bulk_requeue_completed
 fi
 
 round=0
@@ -180,6 +228,9 @@ while true; do
     echo "Enrichment failed (HTTP ${http_code}):" >&2
     cat "$RESPONSE_FILE" >&2
     echo >&2
+    if [ "$http_code" = "503" ] && grep -q '"retry"[[:space:]]*:[[:space:]]*true' "$RESPONSE_FILE" 2>/dev/null; then
+      echo "Database lock — stop ./worker.sh or wait, then rerun." >&2
+    fi
     exit 1
   fi
 

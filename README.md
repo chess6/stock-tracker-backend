@@ -21,6 +21,7 @@ Local-data-first: admin/bootstrap endpoints fill SQLite; the UI reads from cache
 | SQLite DB | `data/stock_tracker.sqlite3` |
 | Background worker | `worker.py` |
 | Shell helpers | `start.sh`, `stop.sh`, `worker.sh`, `worker_stop.sh`, `bootstrap.sh`, `refresh_data.sh` |
+| Capabilities reference | `scripts/capabilities.sh` — env vars, feature flags, worker jobs, research routes |
 | CLI tester | `api_tester.py` |
 | AI orchestrator | `orchestration/` — event-driven agents (see below) |
 | Entity linking docs | `docs/ENTITY_LINKING.md` — ingest / enrich / retag pipeline |
@@ -73,6 +74,94 @@ Create `.env` from the example file:
 cp .env.example .env   # then edit SEC_USER_AGENT
 ```
 
+## Configuration & feature flags
+
+Feature flags default **OFF**. Resolution order:
+
+**ENV (`STOCK_TRACKER_FF_<KEY>`) → SQLite `app_config` → default (False)**
+
+ENV always wins over SQLite. After changing `.env`, restart the API and worker.
+
+### Capabilities script
+
+```bash
+./scripts/capabilities.sh              # full reference + current resolved flag state
+./scripts/capabilities.sh flags        # feature flags only
+./scripts/capabilities.sh enable FLAG  # persist ON in SQLite app_config
+./scripts/capabilities.sh disable FLAG
+./scripts/capabilities.sh env          # print STOCK_TRACKER_FF_* export lines
+```
+
+Equivalent admin API (backend running):
+
+```bash
+curl http://localhost:5000/api/admin/config
+curl -X POST http://localhost:5000/api/admin/config \
+  -H "Content-Type: application/json" \
+  -d '{"experimental_research_queue": true}'
+```
+
+### All flags
+
+| Flag | What it does today |
+|------|-------------------|
+| `experimental_composite_rank` | Article enrichment computes `rank_score` during pipeline finalization |
+| `embedding_heavy_retag` | Embeddings default ON for admin retag/enrich, pipeline refresh, and `enrich_metadata` worker job |
+| `experimental_research_queue` | Gates `GET /api/research/queue`, dismiss route, and nightly `build_research_queue` worker job |
+| `experimental_signal_ranking` | Orchestrator dispatches agents on `analysis_completed` events (requires orchestrator running) |
+| `experimental_research_composite_rank` | Defined; rank routes are **not** gated in code yet |
+| `experimental_thesis_versioning` | Defined; thesis skip logic exists but is **not** gated by this flag yet |
+| `experimental_backtest_route` | Defined; no HTTP route — use `python scripts/backtest.py` instead |
+
+Enable all flags in SQLite:
+
+```bash
+for flag in experimental_composite_rank experimental_research_composite_rank \
+  embedding_heavy_retag experimental_signal_ranking experimental_thesis_versioning \
+  experimental_research_queue experimental_backtest_route; do
+  ./scripts/capabilities.sh enable "$flag"
+done
+./scripts/capabilities.sh flags
+```
+
+Or set all in `.env` (see `.env.example` for `STOCK_TRACKER_FF_*` keys).
+
+### Other useful env vars
+
+| Variable | Purpose |
+|----------|---------|
+| `SEC_USER_AGENT` | **Required** — real contact email for SEC fair-access |
+| `STOCK_TRACKER_DB_PATH` | SQLite path (default: `data/stock_tracker.sqlite3`) |
+| `STOCK_TRACKER_DEFAULT_TICKERS` | Comma-separated tickers for worker nightly ETL |
+| `STOCK_TRACKER_REQUEST_TIMEOUT` | HTTP timeout for SEC/news (default: 20) |
+| `STOCK_TRACKER_LOG_DIR` | Log directory (default: `logs/`) |
+| `NLP_DEVICE` | `auto` (default), `cpu`, or `cuda` for FinBERT/embeddings |
+| `ADMIN_API_KEY` | When set, admin routes require `X-Admin-Api-Key` header |
+| `NASDAQ_API_KEY` | Optional Nasdaq Data Link fallback when cache is empty |
+| `GUNICORN_BIND`, `GUNICORN_WORKERS`, `GUNICORN_THREADS`, `GUNICORN_TIMEOUT` | Production API tuning (`gunicorn.conf.py`) |
+
+### Max capability checklist
+
+Flags alone do not fully populate the system. For the fullest local setup:
+
+1. `./scripts/capabilities.sh flags` — confirm resolved flag state
+2. Enable desired flags (SQLite, `.env`, or `POST /api/admin/config`)
+3. Restart API and worker: `sh stop.sh && sh start.sh` and `sh worker_stop.sh && sh worker.sh`
+4. Load data: `sh bootstrap.sh` or `sh refresh_data.sh`
+5. Enrich articles: `./enrich_articles.sh` (avoid `FAST=1` for full NLP)
+6. Backfill market reactions for research narrative: `./backfill_market_reactions.sh AAPL,MSFT`
+7. Verify research queue: `curl http://localhost:5000/api/research/queue?limit=10` (needs `experimental_research_queue`)
+8. Run backtest CLI: `python scripts/backtest.py --help`
+9. Optional orchestrator: `sh orchestrator_start.sh` (needs `experimental_signal_ranking` + AI provider env)
+
+Trigger research queue build immediately (worker running):
+
+```bash
+curl -X POST http://localhost:5000/api/admin/enqueue-job \
+  -H "Content-Type: application/json" \
+  -d '{"job_type":"build_research_queue","payload":{"limit":50}}'
+```
+
 ## Run & stop
 
 ```bash
@@ -112,6 +201,25 @@ sh worker_stop.sh     # uses .worker.pid
 ```
 
 Jobs persist in the `ingestion_jobs` table. Requires the same `.env` / DB path as the API.
+
+Nightly schedule (02:00) enqueues, in priority order:
+
+| Job | Purpose |
+|-----|---------|
+| `sync_companies` | SEC company directory |
+| `refresh_fundamentals` | SEC CompanyFacts |
+| `refresh_prices` | Stooq/yfinance OHLCV |
+| `refresh_company_scores` | Piotroski, Altman Z, Beneish, survivability |
+| `snapshot_composite_ranks` | Composite rank snapshots (`deep_value`, `turnaround`, …) |
+| `build_research_queue` | Rank/insider/narrative/catalyst queue (**flag-gated**: `experimental_research_queue`) |
+| `snapshot_narrative_intelligence` | Narrative divergence snapshots |
+| `enrich_metadata` | Company sector/industry metadata |
+| `refresh_macro` | Benchmark ETF prices |
+| `refresh_insiders` | SEC Form 4 |
+| `ingest_default_feeds` | RSS poll |
+| `enrich_articles` | Article NLP pipeline |
+
+Other job types (`pipeline_refresh`, `bootstrap`, `refresh_edgar_events`, …) are available via `POST /api/admin/enqueue-job`.
 
 ## First-time data load
 
@@ -181,6 +289,32 @@ curl -X POST http://localhost:5000/api/admin/refresh-macro   # included in refre
 
 **Stale news:** `curl -X POST http://localhost:5000/api/admin/ingest-default-feeds` then `dedup-articles`
 
+### Feature flags
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/admin/config` | Resolved flags, defaults, and stored `app_config` |
+| POST | `/api/admin/config` | Set flags, e.g. `{"experimental_research_queue": true}` |
+
+## Research API (`/api/research`)
+
+Deep-value research endpoints. Most routes are always available; the research queue is flag-gated.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET/POST | `/api/research/rank` | Composite ranking (`weight_overrides` on POST) |
+| GET | `/api/research/rank/history/<ticker>` | Rank history from snapshots |
+| GET | `/api/research/rank/validation` | Forward-return rank validator |
+| GET | `/api/research/rank/baserate` | Gate base-rate validation |
+| GET | `/api/research/queue` | Prioritized research events (**`experimental_research_queue`**) |
+| POST | `/api/research/queue/<ticker>/dismiss` | Dismiss queue item(s) |
+| POST | `/api/research/screen` | Composable screener |
+| GET | `/api/research/gates/<ticker>` | Gate evaluation |
+| GET | `/api/research/pillars/<ticker>` | Pillar scores |
+| GET | `/api/research/thesis/<ticker>` | Full thesis assembly |
+| GET | `/api/research/narrative/<ticker>` | Narrative divergence |
+| GET | `/api/research/insiders/clusters` | Cross-ticker insider clusters |
+
 ## Public API routes
 
 | Method | Path | Purpose |
@@ -203,6 +337,18 @@ python api_tester.py financials --tickers JPM --most-recent
 python api_tester.py status
 python api_tester.py bootstrap --tickers JPM,MCD
 ```
+
+## CLI scripts
+
+| Script | Purpose |
+|--------|---------|
+| `./scripts/capabilities.sh` | Config reference, feature flag enable/disable/env |
+| `python scripts/backtest.py` | Point-in-time composite rank backtest (JSON/CSV) |
+| `python scripts/validate_scores.py` | Score validation against verification tickers |
+| `python scripts/benchmark_refresh.py` | Benchmark `company_scores` refresh latency |
+| `./scripts/test_pipeline_modes.sh` | Smoke-test admin pipeline-refresh modes |
+| `./enrich_articles.sh` | Batch enrichment (`FAST=1`, `RETAG=1`, `FORCE=1` env toggles) |
+| `./backfill_market_reactions.sh` | Backfill `article_market_reactions` for research narrative |
 
 ## Tests
 

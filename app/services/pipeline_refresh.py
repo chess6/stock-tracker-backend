@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 from .pipeline_modes import (
@@ -22,6 +23,24 @@ if TYPE_CHECKING:
     from .prices import PricesService
 
 logger = logging.getLogger("stock_tracker.pipeline.refresh")
+
+
+def should_skip_thesis_recompute(
+    repo: Repository,
+    company_id: int,
+    scoring_version: int,
+    thesis_version: int,
+) -> bool:
+    """Skip thesis recompute when a fresh snapshot exists for current versions."""
+    latest = repo.fetch_latest_thesis_snapshot(company_id)
+    if not latest:
+        return False
+    freshness_cutoff = (date.today() - timedelta(days=7)).isoformat()
+    return (
+        latest["thesis_version"] >= thesis_version
+        and latest["scoring_version"] >= scoring_version
+        and latest["computed_at"] >= freshness_cutoff
+    )
 
 
 class PipelineRefreshService:
@@ -108,7 +127,7 @@ class PipelineRefreshService:
         elif normalized == "full_rebuild":
             stages["feeds"] = self.news.ingest_default_feeds(
                 extract_articles=False,
-                max_articles_per_feed=25,
+                max_articles_per_feed=10,
                 force_refresh=True,
             )
             stages["articles"] = self._enrich_pending_articles(article_limit)

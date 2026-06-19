@@ -121,6 +121,10 @@ def news_feed():
     category = request.args.get("category", "").strip() or None
     source_domain = request.args.get("sourceDomain", "").strip() or None
     tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    divergence_only = str(request.args.get("divergenceOnly", "false")).lower() in {"true", "1", "yes", "on"}
+    sort = request.args.get("sort", "importance").strip().lower() or "importance"
+    if sort not in {"importance", "latest"}:
+        sort = "importance"
     payload = get_repo().list_unique_articles(
         limit=limit,
         offset=offset,
@@ -128,6 +132,26 @@ def news_feed():
         category=category,
         source_domain=source_domain,
         tickers=tickers or None,
+        divergence_only=divergence_only,
+        sort=sort,
+    )
+    return jsonify(payload)
+
+
+@api_bp.route("/news/clusters", methods=["GET"])
+def news_clusters():
+    from ..services.article_cluster import build_cluster_response
+
+    event_type = request.args.get("eventType", "").strip() or request.args.get("event_type", "").strip() or None
+    hours = request.args.get("hours", 72, type=int)
+    limit = min(max(request.args.get("limit", 50, type=int), 1), 200)
+    offset = max(request.args.get("offset", 0, type=int), 0)
+    payload = build_cluster_response(
+        get_repo(),
+        event_type=event_type,
+        hours=hours,
+        limit=limit,
+        offset=offset,
     )
     return jsonify(payload)
 
@@ -431,6 +455,49 @@ def add_watchlist_ticker(name: str):
     return jsonify({"added": ticker, "watchlist": name})
 
 
+# -- saved screens (user-facing, no admin auth) -----------------------------
+
+
+@api_bp.route("/screens", methods=["GET"])
+def list_saved_screens():
+    return jsonify({"screens": get_repo().list_saved_screens()})
+
+
+@api_bp.route("/screens/<screen_id>", methods=["PUT"])
+def upsert_saved_screen(screen_id: str):
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+
+    filter_groups = body.get("filterGroups")
+    if not isinstance(filter_groups, list) or not filter_groups:
+        return jsonify({"error": "filterGroups must be a non-empty array"}), 400
+
+    spec = {
+        "universe": body.get("universe") or "sp500",
+        "filterGroups": filter_groups,
+        "sort": body.get("sort"),
+        "limit": body.get("limit", 100),
+        "sourcePresetId": body.get("sourcePresetId"),
+    }
+    screen = get_repo().upsert_saved_screen(
+        screen_id,
+        name,
+        spec,
+        description=body.get("description"),
+    )
+    return jsonify(screen)
+
+
+@api_bp.route("/screens/<screen_id>", methods=["DELETE"])
+def delete_saved_screen(screen_id: str):
+    deleted = get_repo().delete_saved_screen(screen_id)
+    if not deleted:
+        return jsonify({"error": "Screen not found"}), 404
+    return jsonify({"deleted": screen_id})
+
+
 @api_bp.route("/watchlists/<name>/tickers/<ticker>", methods=["DELETE"])
 def remove_watchlist_ticker(name: str, ticker: str):
     repo = get_repo()
@@ -662,7 +729,31 @@ def ingest_feed():
 
 @api_bp.route("/admin/default-feeds", methods=["GET"])
 def default_feeds():
-    return jsonify({"feeds": get_news_service().default_feeds()})
+    from ..services.news import DEFAULT_ACTIVE_FEED_COUNT, DEFAULT_FEEDS
+
+    return jsonify(
+        {
+            "feeds": get_news_service().default_feeds(),
+            "activeFeedCount": DEFAULT_ACTIVE_FEED_COUNT,
+            "totalFeedCount": len(DEFAULT_FEEDS),
+        }
+    )
+
+
+@api_bp.route("/admin/feed-packs", methods=["GET", "POST"])
+def feed_packs():
+    repo = get_repo()
+    if request.method == "GET":
+        return jsonify(repo.list_feed_packs())
+
+    body = request.get_json(silent=True) or {}
+    packs = body.get("enabledPacks") or body.get("enabled_packs") or []
+    if not isinstance(packs, list):
+        return jsonify({"error": "enabledPacks must be an array"}), 400
+    enabled = repo.set_enabled_feed_packs([str(pack) for pack in packs])
+    payload = repo.list_feed_packs()
+    payload["enabledPacks"] = enabled
+    return jsonify(payload)
 
 
 @api_bp.route("/admin/ingest-default-feeds", methods=["POST"])
@@ -712,10 +803,16 @@ def ingest_default_feeds():
 
 @api_bp.route("/admin/enrich-articles/status", methods=["GET"])
 def enrich_articles_status():
+    from ..services.embeddings_service import embedding_model_status
+
     repo = get_repo()
     counts = repo.get_pipeline_status_counts()
     counts["retag_candidates"] = repo.count_articles_for_retag(only_missing_enrichment=True)
     counts["retag_total"] = repo.count_articles_for_retag(only_missing_enrichment=False)
+    embeddings_ok, embeddings_error = embedding_model_status()
+    counts["embeddings_available"] = embeddings_ok
+    if embeddings_error:
+        counts["embeddings_error"] = embeddings_error
     counts["api_features"] = {"retag_endpoint": True, "pipeline_version": 2}
     return jsonify(counts)
 
@@ -758,6 +855,11 @@ def retag_articles_admin():
 
 @api_bp.route("/admin/enrich-articles", methods=["POST"])
 def enrich_articles_admin():
+    import sqlite3
+
+    from ..db import is_sqlite_lock_error, retry_on_sqlite_lock
+    from ..services.embeddings_service import EmbeddingsUnavailableError
+
     body = request.get_json(silent=True) or {}
     limit = request.args.get("limit", type=int) or body.get("limit") or 25
     from ..services.article_pipeline import ArticlePipeline
@@ -770,15 +872,44 @@ def enrich_articles_admin():
     )
     enable_finbert = _coerce_bool(body.get("enable_finbert"), default=True)
     force = _coerce_bool(request.args.get("force"), default=False) or _coerce_bool(body.get("force"))
+    requeue_completed = (
+        force
+        or _coerce_bool(request.args.get("requeueCompleted"), default=False)
+        or _coerce_bool(request.args.get("requeue_completed"), default=False)
+        or _coerce_bool(body.get("requeue_completed"), default=False)
+        or _coerce_bool(body.get("requeueCompleted"), default=False)
+    )
+    requeue_only = (
+        _coerce_bool(request.args.get("requeueOnly"), default=False)
+        or _coerce_bool(request.args.get("requeue_only"), default=False)
+        or _coerce_bool(body.get("requeue_only"), default=False)
+        or _coerce_bool(body.get("requeueOnly"), default=False)
+    )
     retag_only = (
         _coerce_bool(request.args.get("retagOnly"), default=False)
         or _coerce_bool(request.args.get("retag_only"), default=False)
         or _coerce_bool(body.get("retag_only"), default=False)
         or _coerce_bool(body.get("retagOnly"), default=False)
     )
+    requeue_limit = request.args.get("requeueLimit", type=int) or body.get("requeue_limit") or body.get("requeueLimit")
+    if requeue_limit is None:
+        requeue_limit = max(int(limit) * 20, 500)
     requeued = 0
-    if force and not retag_only:
-        requeued = repo.requeue_completed_articles(limit=max(int(limit) * 20, 500))
+    if requeue_completed and not retag_only:
+        requeued = repo.requeue_completed_articles(limit=int(requeue_limit))
+    repo.recover_stuck_pipeline_articles()
+
+    if requeue_only and not retag_only:
+        pipeline_counts = repo.get_pipeline_status_counts()
+        return jsonify(
+            {
+                "requeued": requeued,
+                "processed": 0,
+                "results": [],
+                "pipeline": pipeline_counts,
+                "mode": "requeue",
+            }
+        )
 
     try:
         pipeline = ArticlePipeline(
@@ -799,9 +930,26 @@ def enrich_articles_admin():
                 retag_all=bool(retag_all),
             )
         else:
-            payload = pipeline.process_batch(limit=int(limit))
+            def _run_batch() -> dict:
+                return pipeline.process_batch(limit=int(limit))
+
+            payload = retry_on_sqlite_lock(_run_batch, operation="enrich_articles_batch")
         if requeued:
             payload["requeued"] = requeued
+    except EmbeddingsUnavailableError as exc:
+        current_app.logger.error("Article enrichment blocked: %s", exc)
+        return jsonify({"error": str(exc), "embeddings_available": False}), 503
+    except sqlite3.OperationalError as exc:
+        if is_sqlite_lock_error(exc):
+            current_app.logger.warning("Article enrichment database lock: %s", exc)
+            return jsonify(
+                {
+                    "error": "database is locked — stop the worker or wait for other enrich jobs to finish",
+                    "retry": True,
+                }
+            ), 503
+        current_app.logger.exception("Article enrichment failed")
+        return jsonify({"error": str(exc)}), 500
     except Exception as exc:
         current_app.logger.exception("Article enrichment failed")
         return jsonify({"error": str(exc)}), 500
@@ -875,7 +1023,7 @@ def bootstrap():
     try:
         companies = fundamentals_service.refresh_company_tickers(current_app.config["SEC_COMPANY_TICKERS_URL"])
         fundamentals = fundamentals_service.refresh_fundamentals(tickers)
-        feeds = news_service.ingest_default_feeds(extract_articles=False, max_articles_per_feed=25)
+        feeds = news_service.ingest_default_feeds(extract_articles=False, max_articles_per_feed=10)
         prices = prices_service.refresh_prices(tickers)
         insiders = insiders_service.refresh_insiders(tickers)
     except Exception as exc:

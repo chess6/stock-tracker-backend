@@ -10,10 +10,10 @@ from app.services.feature_flags import (
 
 
 def test_feature_flags_default_off():
-    assert FLAG_DEFAULTS["experimental_composite_rank"] is False
+    assert FLAG_DEFAULTS["experimental_composite_rank"] is True
     assert FLAG_DEFAULTS["embedding_heavy_retag"] is False
     assert FLAG_DEFAULTS["experimental_signal_ranking"] is False
-    assert is_enabled("experimental_composite_rank") is False
+    assert is_enabled("experimental_composite_rank") is True
     assert embeddings_default_enabled() is False
 
 
@@ -32,7 +32,7 @@ def test_feature_flags_sqlite_override(app):
         assert is_enabled("experimental_signal_ranking", repo) is True
         flags = resolve_flags(repo)
         assert flags["experimental_signal_ranking"] is True
-        assert flags["experimental_composite_rank"] is False
+        assert flags["experimental_composite_rank"] is True
 
 
 def test_pipeline_skips_rank_when_composite_flag_off(app, monkeypatch):
@@ -42,6 +42,7 @@ def test_pipeline_skips_rank_when_composite_flag_off(app, monkeypatch):
         from app.tests.test_article_pipeline import _insert_article
 
         repo = Repository(get_db())
+        repo.set_config("experimental_composite_rank", False)
         article_id = _insert_article(repo, body_text="")
         monkeypatch.setattr(
             "app.services.article_pipeline.DomainFetcher.fetch_and_extract",
@@ -78,7 +79,7 @@ def test_admin_config_routes(app, client):
     assert get_resp.status_code == 200
     payload = get_resp.get_json()
     assert "flags" in payload
-    assert payload["flags"]["experimental_composite_rank"] is False
+    assert payload["flags"]["experimental_composite_rank"] is True
 
     post_resp = client.post(
         "/api/admin/config",

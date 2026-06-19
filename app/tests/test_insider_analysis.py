@@ -4,6 +4,7 @@ from datetime import date, timedelta
 
 from app.services.insider_analysis import (
     analyze_insider_activity,
+    build_insider_conviction_alerts,
     compute_intensity_score,
     detect_clusters,
     summarize_window,
@@ -132,3 +133,40 @@ def test_analyze_insider_activity_includes_ratio_windows():
     assert "90d" in result["ratios"]
     assert "180d" in result["ratios"]
     assert "365d" in result["ratios"]
+
+
+def test_build_insider_conviction_alerts_filters_by_intensity(app):
+    from app.db import get_db
+    from app.repositories import Repository
+
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "CLUS", "name": "Cluster Co"}])
+        company = repo.get_company_by_ticker("CLUS")
+        today = date.today().isoformat()
+        repo.upsert_insider_cluster_analysis(
+            company["id"],
+            [
+                {
+                    "window_start": today,
+                    "window_end": today,
+                    "buy_count": 4,
+                    "sell_count": 0,
+                    "unique_buyers": 4,
+                    "total_buy_value": 2_500_000.0,
+                    "total_sell_value": 0.0,
+                    "avg_buy_price": 10.0,
+                    "intensity_score": 0.75,
+                }
+            ],
+        )
+        payload = build_insider_conviction_alerts(repo, min_intensity=0.3, limit=10)
+        tickers = [item["ticker"] for item in payload["alerts"]]
+        assert "CLUS" in tickers
+
+
+def test_insider_alerts_route_disabled_without_flag(app, client):
+    response = client.get("/api/research/insider-alerts")
+    assert response.status_code == 404
+    assert response.get_json()["flag"] == "experimental_insider_alerts"
+
