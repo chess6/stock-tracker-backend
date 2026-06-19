@@ -2756,6 +2756,8 @@ class Repository:
                 i.transaction_date,
                 i.owner_name,
                 i.transaction_code,
+                i.shares,
+                i.price_per_share,
                 i.transaction_value,
                 i.security_title,
                 CASE WHEN i.transaction_code = 'S' THEN 'ND' ELSE 'NA' END AS security_ad_code

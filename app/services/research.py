@@ -10,6 +10,7 @@ from .fundamentals import (
     collapse_narrow_fundamentals_rows,
     compute_ttm_rows,
     fetch_resolved_wide_rows,
+    normalize_fundamentals_row,
     pivot_fundamentals_rows,
     resolve_financial_dimension,
 )
@@ -175,6 +176,7 @@ class ResearchService:
 
         periods = []
         for row in all_rows:
+            row = normalize_fundamentals_row(row)
             period_end = row.get("calendardate")
             price_at_period = self._price_near_date(price_rows, period_end)
             metrics = build_company_metrics(row, price=price_at_period or latest_price)

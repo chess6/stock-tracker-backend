@@ -8,6 +8,7 @@ import requests
 
 from ..repositories import Repository
 from .company_enrichment import metadata_from_submissions
+from .metric_primitives import normalize_fundamentals_row
 from .metrics_engine import build_company_metrics
 from .scoring import compute_scores_for_periods, scores_to_json
 from .sec import normalize_company_facts
@@ -166,6 +167,20 @@ def filter_canonical_annual_wide_rows(wide_rows: list[dict]) -> list[dict]:
         reverse=True,
     )
     return filtered
+
+
+def _load_financials_wide_rows(
+    narrow_rows: list[dict],
+    storage_dimension: str | None,
+) -> list[dict]:
+    """Apply Research-parity collapse + canonical annual filter for financials history."""
+    if storage_dimension == "ARY":
+        collapsed = collapse_narrow_fundamentals_rows(narrow_rows, annual=True)
+        return pivot_fundamentals_rows(collapsed, canonical_annual=True)
+    if storage_dimension == "ARQ":
+        collapsed = collapse_narrow_fundamentals_rows(narrow_rows, annual=False)
+        return pivot_fundamentals_rows(collapsed, canonical_annual=False)
+    return pivot_fundamentals_rows(narrow_rows)
 
 
 def pivot_fundamentals_rows(rows: list[dict], *, canonical_annual: bool = False) -> list[dict]:
@@ -412,14 +427,18 @@ def fetch_resolved_wide_rows(
         gte=gte,
         dimension=storage_dimension if isinstance(storage_dimension, str) else None,
     )
-    wide_rows = pivot_fundamentals_rows(rows)
+    dim = storage_dimension if isinstance(storage_dimension, str) else None
+    wide_rows = _load_financials_wide_rows(rows, dim)
 
     if not wide_rows:
         legacy_dim = resolved.get("legacy_storage_dimension")
         if legacy_dim or resolved.get("legacy_ttm_only"):
             source_dim = legacy_dim if isinstance(legacy_dim, str) else "ARQ"
             legacy_rows = repo.fetch_fundamentals_rows(tickers, gte=gte, dimension=source_dim)
-            wide_rows = pivot_fundamentals_rows(legacy_rows)
+            wide_rows = _load_financials_wide_rows(
+                legacy_rows,
+                source_dim if isinstance(source_dim, str) else None,
+            )
             if resolved.get("legacy_ttm_only"):
                 wide_rows = compute_ttm_rows(wide_rows)
 
@@ -874,22 +893,42 @@ class FundamentalsService:
             if price_rows:
                 latest_prices[ticker.upper()] = price_rows[0]["close"]
 
-        datatable_rows = [
-            [row.get(column["name"]) for column in RAW_COLUMNS]
-            for row in wide_rows
-        ]
+        datatable_rows = []
         metrics: dict[str, dict] = {}
+        period_series: dict[str, list] = defaultdict(list)
         for row in wide_rows:
-            ticker = row["ticker"]
-            period_end = row.get("calendardate")
+            normalized = normalize_fundamentals_row(row)
+            ticker = normalized["ticker"]
+            period_end = normalized.get("calendardate")
             price = None
             if period_end:
                 price = prices_by_ticker_period.get((ticker, period_end))
             if price is None:
                 price = latest_prices.get(ticker)
-            metrics[ticker] = build_company_metrics(row, price=price)
+            datatable_rows.append([normalized.get(column["name"]) for column in RAW_COLUMNS])
+            period_metrics = build_company_metrics(normalized, price=price)
+            period_series[ticker].append({
+                "periodEnd": period_end,
+                "dimension": normalized.get("dimension"),
+                "periodType": normalized.get("periodtype"),
+                "fundamentals": {
+                    col["name"]: normalized.get(col["name"])
+                    for col in RAW_COLUMNS
+                    if col["type"] == "double"
+                },
+                "metrics": period_metrics,
+            })
+            if ticker not in metrics or (period_end or "") >= (metrics[ticker].get("_periodEnd") or ""):
+                metrics[ticker] = {**period_metrics, "_periodEnd": period_end}
+        for ticker in list(metrics.keys()):
+            metrics[ticker].pop("_periodEnd", None)
+            period_series[ticker].sort(
+                key=lambda item: item.get("periodEnd") or "",
+                reverse=True,
+            )
         return {
             "metrics": metrics,
+            "periodSeries": period_series,
             "raw": {
                 "datatable": {
                     "columns": RAW_COLUMNS,

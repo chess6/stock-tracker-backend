@@ -725,3 +725,66 @@ def test_research_ticker_detail_annual_periods_are_canonical(client):
     period_ends = [period["periodEnd"] for period in payload["periods"]]
     assert period_ends == ["2012-09-29", "2011-09-24"]
     assert "2012-03-31" not in period_ends
+
+
+def test_get_financials_payload_ary_collapses_interim_periods():
+    from app.services.fundamentals import FundamentalsService
+
+    narrow_rows = (
+        _aapl_fy_row("2012-09-29", 2012, 156_000_000_000)
+        + _aapl_fy_row("2011-09-24", 2011, 108_000_000_000)
+        + [
+            {
+                "ticker": "AAPL",
+                "company_name": "Apple Inc.",
+                "metric": "eps",
+                "value": 12.3,
+                "period_end": "2012-03-31",
+                "period_type": "annual",
+                "dimension": "ARY",
+                "fiscal_year": 2012,
+                "fiscal_quarter": "Q2",
+                "filing_date": "2012-05-01",
+            },
+            {
+                "ticker": "AAPL",
+                "company_name": "Apple Inc.",
+                "metric": "ncfdiv",
+                "value": 2_500_000_000,
+                "period_end": "2011-12-31",
+                "period_type": "annual",
+                "dimension": "ARY",
+                "fiscal_year": 2011,
+                "fiscal_quarter": "Q1",
+                "filing_date": "2012-02-01",
+            },
+        ]
+    )
+
+    class FakeRepo:
+        def fetch_fundamentals_rows(self, tickers, gte=None, dimension=None):
+            if dimension != "ARY":
+                return []
+            rows = []
+            for item in narrow_rows:
+                if gte and (item.get("period_end") or "") < gte:
+                    continue
+                rows.append({**item, "company_name": "Apple Inc."})
+            return rows
+
+        def fetch_prices(self, ticker, limit=None):
+            return []
+
+        def fetch_prices_by_period_ends(self, ticker, period_ends):
+            return {period_end: None for period_end in period_ends}
+
+    payload = FundamentalsService(FakeRepo(), None).get_financials_payload(
+        ["AAPL"],
+        gte=None,
+        dimension="ARY",
+        most_recent=False,
+    )
+    period_ends = [item["periodEnd"] for item in payload["periodSeries"]["AAPL"]]
+    assert period_ends == ["2012-09-29", "2011-09-24"]
+    assert "2012-03-31" not in period_ends
+    assert "2011-12-31" not in period_ends

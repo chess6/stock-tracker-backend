@@ -9,6 +9,19 @@ def safe_div(numerator: float | None, denominator: float | None) -> float | None
     return numerator / denominator
 
 
+def normalize_fundamentals_row(row: dict) -> dict:
+    """Shallow copy with safe derived fields (e.g. revenue from gp + cor)."""
+    out = dict(row)
+    if out.get("revenue") is None:
+        gp = out.get("gp")
+        cor = out.get("cor")
+        if gp is not None and cor is not None:
+            derived = gp + cor
+            if derived > 0:
+                out["revenue"] = derived
+    return out
+
+
 def total_debt(row: dict) -> float | None:
     debt = row.get("debt")
     if debt is not None:
@@ -136,6 +149,95 @@ def roe(row: dict) -> float | None:
 
 def asset_turnover(row: dict) -> float | None:
     return safe_div(row.get("revenue"), row.get("assets"))
+
+
+def effective_tax_rate(row: dict) -> float | None:
+    netinc = row.get("netinc")
+    taxexp = row.get("taxexp")
+    if netinc is None or taxexp is None:
+        return None
+    pretax = netinc + abs(taxexp)
+    if pretax <= 0:
+        return None
+    return abs(taxexp) / pretax
+
+
+def nopat(row: dict) -> float | None:
+    opinc = row.get("opinc") or row.get("ebit")
+    if opinc is None:
+        return None
+    rate = effective_tax_rate(row)
+    if rate is None:
+        return opinc
+    return opinc * (1.0 - rate)
+
+
+def invested_capital(row: dict) -> float | None:
+    debt = total_debt(row)
+    equity = row.get("equity")
+    cash = row.get("cashneq")
+    if debt is None and equity is None:
+        return None
+    return (debt or 0.0) + (equity or 0.0) - (cash or 0.0)
+
+
+def roic(row: dict) -> float | None:
+    capital = invested_capital(row)
+    if capital in (None, 0):
+        return None
+    return safe_div(nopat(row), capital)
+
+
+def net_debt(row: dict) -> float | None:
+    debt = total_debt(row)
+    cash = row.get("cashneq")
+    if debt is None and cash is None:
+        return None
+    return (debt or 0.0) - (cash or 0.0)
+
+
+def payout_ratio(row: dict) -> float | None:
+    netinc = row.get("netinc")
+    ncfdiv = row.get("ncfdiv")
+    if netinc in (None, 0) or ncfdiv is None:
+        return None
+    return safe_div(abs(ncfdiv), abs(netinc))
+
+
+def inventory_turnover(row: dict) -> float | None:
+    cor = row.get("cor")
+    inventory = row.get("inventory")
+    if cor is None:
+        return safe_div(row.get("revenue"), inventory)
+    return safe_div(cor, inventory)
+
+
+def receivables_days(row: dict) -> float | None:
+    revenue = row.get("revenue")
+    receivables = row.get("receivables")
+    ratio = safe_div(receivables, revenue)
+    if ratio is None:
+        return None
+    return ratio * 365.0
+
+
+def payables_days(row: dict) -> float | None:
+    cor = row.get("cor")
+    payables = row.get("payables")
+    denominator = cor if cor not in (None, 0) else row.get("revenue")
+    ratio = safe_div(payables, denominator)
+    if ratio is None:
+        return None
+    return ratio * 365.0
+
+
+def tangible_book_per_share(row: dict) -> float | None:
+    shares = row.get("sharesbas")
+    equity = row.get("equity")
+    if shares in (None, 0) or equity is None:
+        return None
+    tangible = equity - (row.get("goodwill") or 0.0) - (row.get("intangibles") or 0.0)
+    return tangible / shares
 
 
 def leverage(row: dict) -> float | None:

@@ -15,22 +15,31 @@ from .metric_primitives import (
     free_cash_flow,
     gross_margin,
     interest_coverage,
+    inventory_turnover,
     leverage,
+    net_debt,
     net_margin,
+    normalize_fundamentals_row,
     operating_margin,
+    payables_days,
+    payout_ratio,
     price_to_conservative_nav,
     quick_ratio,
+    receivables_days,
     resolve_ebitda,
     roa,
     roe,
+    roic,
     safe_div,
     sloan_accruals,
+    tangible_book_per_share,
     total_debt,
 )
 
 
 def compute_period_metrics(row: dict, price: float | None = None) -> dict[str, float | None]:
     """Compute canonical snake_case metrics for one fundamentals wide row."""
+    row = normalize_fundamentals_row(row)
     shares = row.get("sharesbas")
     revenue = row.get("revenue")
     assets = row.get("assets")
@@ -65,6 +74,9 @@ def compute_period_metrics(row: dict, price: float | None = None) -> dict[str, f
     asset_per_share = safe_div(assets, shares)
 
     ebitda_ev = safe_div(ebitda, enterprise_value)
+    ev_ebitda = safe_div(enterprise_value, ebitda)
+    ev_sales = safe_div(enterprise_value, revenue)
+    fcf_yield = safe_div(fcf, enterprise_value)
     rev_debt = safe_div(revenue, debt) if debt not in (None, 0) else None
     mc_ev = safe_div(market_cap, enterprise_value)
 
@@ -82,7 +94,11 @@ def compute_period_metrics(row: dict, price: float | None = None) -> dict[str, f
         "revenue": revenue,
         "sales_per_share": sales_per_share,
         "ebitda_ev": ebitda_ev,
+        "ev_ebitda": ev_ebitda,
+        "ev_sales": ev_sales,
+        "fcf_yield": fcf_yield,
         "book_value_per_share": book_value,
+        "tangible_book_per_share": tangible_book_per_share(row),
         "eps": eps,
         "cashflow_ops_per_share": cashflow_ops_per_share,
         "sfcf_per_share": sfcf_per_share,
@@ -110,6 +126,12 @@ def compute_period_metrics(row: dict, price: float | None = None) -> dict[str, f
         "cash_to_debt": cash_to_debt(row),
         "div_yield": div_yield,
         "asset_turnover": asset_turnover(row),
+        "roic": roic(row),
+        "net_debt": net_debt(row),
+        "payout_ratio": payout_ratio(row),
+        "inventory_turnover": inventory_turnover(row),
+        "receivables_days": receivables_days(row),
+        "payables_days": payables_days(row),
         "conservative_nav_per_share": conservative_nav_per_share(row),
         "price_to_conservative_nav": price_to_conservative_nav(price, conservative_nav_per_share(row)),
         "sloan_accruals": sloan_accruals(row),
@@ -122,7 +144,11 @@ _API_FIELD_MAP: dict[str, str] = {
     "revenue": "revenue",
     "sales_per_share": "sp",
     "ebitda_ev": "ebitdaEv",
+    "ev_ebitda": "evEbitda",
+    "ev_sales": "evSales",
+    "fcf_yield": "fcfYield",
     "book_value_per_share": "tbp",
+    "tangible_book_per_share": "tangibleBookPerShare",
     "eps": "ep",
     "cashflow_ops_per_share": "cfop",
     "sfcf_per_share": "sfcfp",
@@ -150,6 +176,12 @@ _API_FIELD_MAP: dict[str, str] = {
     "cash_to_debt": "cashToDebt",
     "div_yield": "divYield",
     "asset_turnover": "assetTurnover",
+    "roic": "roic",
+    "net_debt": "netDebt",
+    "payout_ratio": "payoutRatio",
+    "inventory_turnover": "inventoryTurnover",
+    "receivables_days": "receivablesDays",
+    "payables_days": "payablesDays",
     "conservative_nav_per_share": "conservativeNavPerShare",
     "price_to_conservative_nav": "priceToConservativeNav",
     "sloan_accruals": "sloanAccruals",

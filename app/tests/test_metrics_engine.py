@@ -105,3 +105,22 @@ def test_gross_margin_allows_high_software_margins():
     assert gross_margin(row) == pytest.approx(21_218.0 / 23_769.0, rel=1e-6)
 
 
+def test_normalize_fundamentals_row_derives_revenue_from_gp_and_cor():
+    from app.services.metric_primitives import normalize_fundamentals_row
+
+    row = {"gp": 400.0, "cor": 600.0}
+    normalized = normalize_fundamentals_row(row)
+    assert normalized["revenue"] == 1000.0
+
+
+def test_compute_period_metrics_new_ratios():
+    row = _sample_row()
+    metrics = compute_period_metrics(row, price=20.0)
+    assert metrics["ev_ebitda"] is not None
+    assert metrics["fcf_yield"] is not None
+    assert metrics["roic"] is not None
+    assert metrics["net_debt"] == 200.0
+    assert metrics["payout_ratio"] == 0.25
+    assert metrics["tangible_book_per_share"] is not None
+
+
