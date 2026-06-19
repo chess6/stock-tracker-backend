@@ -24,7 +24,6 @@ from .insider_analysis import (
     format_transaction,
 )
 from .narrative import build_narrative_analysis
-from .latent_metrics import compute_latent_metrics, latent_metrics_to_api
 
 logger = logging.getLogger("stock_tracker.research")
 
@@ -80,13 +79,6 @@ class ResearchService:
                     "signal": narrative_snap.get("divergence_signal"),
                     "divergenceScore": narrative_snap.get("divergence_score"),
                 }
-            latent = compute_latent_metrics(
-                self.repo,
-                ticker,
-                row=row,
-                price=price,
-                sector=(company or {}).get("sector"),
-            )
             results[ticker] = {
                 "ticker": ticker,
                 "companyName": row.get("company_name") or (company or {}).get("name"),
@@ -96,7 +88,6 @@ class ResearchService:
                 "dimension": row.get("dimension"),
                 "fundamentals": {col["name"]: row.get(col["name"]) for col in RAW_COLUMNS if col["type"] == "double"},
                 "metrics": metrics,
-                "thesisMetrics": latent_metrics_to_api(latent),
                 "scores": scores_by_ticker.get(ticker),
                 "marginTrends": {
                     "grossMargin3yrDelta": margin_trend_delta(annual_rows, 3, _gross_margin),
@@ -293,15 +284,28 @@ class ResearchService:
         return written
 
     def _enrich_insider_summaries(self, insider_summary: dict[str, dict], tickers: list[str]) -> None:
+        ticker_company_ids: dict[str, int] = {}
         for symbol in tickers:
             key = symbol.upper()
-            base = insider_summary.get(key)
-            if not base:
+            if key not in insider_summary:
                 continue
             company = self.repo.get_company_by_ticker(key)
-            if not company:
+            if company:
+                ticker_company_ids[key] = int(company["id"])
+
+        if not ticker_company_ids:
+            return
+
+        raw_by_company = self.repo.fetch_insider_transactions_raw_batch(
+            list(ticker_company_ids.values()),
+            limit_per_company=500,
+        )
+        company_to_ticker = {company_id: ticker for ticker, company_id in ticker_company_ids.items()}
+        for company_id, raw in raw_by_company.items():
+            ticker = company_to_ticker.get(company_id)
+            base = insider_summary.get(ticker or "")
+            if not base:
                 continue
-            raw = self.repo.fetch_insider_transactions_raw(company["id"], limit=500)
             analysis = analyze_insider_activity(raw)
             base["uniqueBuyers90d"] = analysis["uniqueBuyers90d"]
             base["intensityScore90d"] = analysis["intensityScore90d"]

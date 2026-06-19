@@ -832,6 +832,12 @@ def test_research_routes_return_screener_and_ticker_payload(app, client):
     assert payload["results"]["AAPL"]["scores"]["altmanZ"] is not None
     assert payload["results"]["AAPL"]["narrativeDivergence"]["signal"] == "rerating_candidate"
 
+    narrative = client.get("/api/research/narrative-divergence?tickers=AAPL")
+    assert narrative.status_code == 200
+    narrative_payload = narrative.get_json()
+    assert narrative_payload["results"]["AAPL"]["divergenceSignal"] == "rerating_candidate"
+    assert narrative_payload["results"]["AAPL"]["divergenceScore"] == 0.75
+
     detail = client.get("/api/research/ticker/AAPL")
     assert detail.status_code == 200
     detail_payload = detail.get_json()

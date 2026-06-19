@@ -1508,6 +1508,51 @@ class Repository:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def fetch_insider_transactions_raw_batch(
+        self,
+        company_ids: list[int],
+        *,
+        limit_per_company: int = 500,
+    ) -> dict[int, list[dict]]:
+        if not company_ids:
+            return {}
+        unique_ids = sorted({int(company_id) for company_id in company_ids})
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT company_id, filing_date, transaction_date, owner_name,
+                   transaction_code, shares, price_per_share, transaction_value,
+                   security_title
+            FROM (
+                SELECT
+                    company_id,
+                    filing_date,
+                    transaction_date,
+                    owner_name,
+                    transaction_code,
+                    shares,
+                    price_per_share,
+                    transaction_value,
+                    security_title,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY company_id
+                        ORDER BY transaction_date DESC, filing_date DESC
+                    ) AS row_rank
+                FROM insider_transactions
+                WHERE company_id IN ({placeholders})
+            )
+            WHERE row_rank <= ?
+            ORDER BY company_id, transaction_date DESC, filing_date DESC
+            """,
+            [*unique_ids, max(1, int(limit_per_company))],
+        ).fetchall()
+        output: dict[int, list[dict]] = {company_id: [] for company_id in unique_ids}
+        for row in rows:
+            item = dict(row)
+            company_id = int(item.pop("company_id"))
+            output.setdefault(company_id, []).append(item)
+        return output
+
     def upsert_insider_cluster_analysis(self, company_id: int, records: Iterable[dict]) -> int:
         rows = [
             (

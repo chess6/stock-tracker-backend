@@ -195,6 +195,25 @@ def research_screener():
     return jsonify(_attach_research_meta(payload))
 
 
+@research_bp.route("/narrative-divergence", methods=["GET"])
+def narrative_divergence():
+    tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    if not tickers:
+        return jsonify({"error": "No tickers provided"}), 400
+    if len(tickers) > 100:
+        return jsonify({"error": "Maximum 100 tickers per request"}), 400
+    repo = Repository(get_db())
+    snapshots = repo.fetch_latest_narrative_snapshots(tickers)
+    results = {
+        ticker: {
+            "divergenceSignal": snap.get("divergence_signal"),
+            "divergenceScore": snap.get("divergence_score"),
+        }
+        for ticker, snap in snapshots.items()
+    }
+    return jsonify(_attach_research_meta({"results": results}))
+
+
 @research_bp.route("/ticker/<ticker>", methods=["GET"])
 def research_ticker(ticker: str):
     dimension = request.args.get("dimension", "MRY")
