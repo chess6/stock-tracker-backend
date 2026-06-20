@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 
 from ..repositories import Repository
@@ -40,6 +41,16 @@ MACRO_SYMBOLS = [
 MACRO_TICKERS = [entry["symbol"] for entry in MACRO_SYMBOLS if not entry["symbol"].startswith("^")]
 
 
+def _finite_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _empty_item(entry: dict) -> dict:
     return {
         "id": entry["id"],
@@ -53,18 +64,32 @@ def _empty_item(entry: dict) -> dict:
 
 
 def _item_from_closes(entry: dict, close: float, prev_close: float) -> dict:
-    if prev_close == 0:
+    close_val = _finite_float(close)
+    prev_val = _finite_float(prev_close)
+    if close_val is None or prev_val is None or prev_val == 0:
         change_pct = None
     else:
-        change_pct = ((close - prev_close) / prev_close) * 100
+        change_pct = _finite_float(((close_val - prev_val) / prev_val) * 100)
     return {
         "id": entry["id"],
         "label": entry["label"],
         "symbol": entry["symbol"],
         "group": entry["group"],
-        "price": close,
+        "price": close_val,
         "changePct": change_pct,
-        "available": True,
+        "available": close_val is not None,
+    }
+
+
+def _normalize_item(item: dict) -> dict:
+    price = _finite_float(item.get("price"))
+    change_pct = _finite_float(item.get("changePct"))
+    available = bool(item.get("available")) and price is not None
+    return {
+        **item,
+        "price": price,
+        "changePct": change_pct,
+        "available": available,
     }
 
 
@@ -110,7 +135,7 @@ class MacroSnapshotService:
         items = []
         unavailable = 0
         for entry in MACRO_SYMBOLS:
-            item = items_by_id.get(entry["id"]) or _empty_item(entry)
+            item = _normalize_item(items_by_id.get(entry["id"]) or _empty_item(entry))
             if not item.get("available"):
                 unavailable += 1
             items.append(item)
