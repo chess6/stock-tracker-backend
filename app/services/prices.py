@@ -23,7 +23,7 @@ class PricesService:
         self.repo = repo
         self.stooq = stooq or StooqClient()
 
-    def refresh_prices(self, tickers: list[str], days: int = 400) -> dict:
+    def refresh_prices(self, tickers: list[str], days: int = 1825) -> dict:
         logger.info("refresh_prices start tickers=%d days=%d", len(tickers), days)
         t0 = time.monotonic()
         refreshed = []

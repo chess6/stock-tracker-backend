@@ -36,7 +36,7 @@ def enqueue_scheduled_jobs(database_path: str, tickers: list[str]) -> None:
     def _enqueue(repo: Repository) -> None:
         repo.enqueue_job("sync_companies", {}, priority=10)
         repo.enqueue_job("refresh_fundamentals", {"tickers": tickers}, priority=20)
-        repo.enqueue_job("refresh_prices", {"tickers": tickers}, priority=30)
+        repo.enqueue_job("refresh_prices", {"tickers": tickers, "days": 1825}, priority=30)
         repo.enqueue_job("refresh_company_scores", {"all": True}, priority=32)
         repo.enqueue_job("snapshot_composite_ranks", {"universe": "sp500"}, priority=34)
         repo.enqueue_job("build_research_queue", {"limit": 50, "max_age_days": 30}, priority=35)
