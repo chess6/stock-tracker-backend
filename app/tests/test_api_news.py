@@ -104,6 +104,32 @@ def test_news_feed_sorted_by_latest(app, client):
     assert titles.index("Newer low importance latest sort") < titles.index("Older high importance latest sort")
 
 
+def test_news_source_domains_route(app, client):
+    with app.app_context():
+        repo = Repository(get_db())
+        for idx, domain in enumerate(["reuters.com", "cnbc.com", "reuters.com"]):
+            repo.upsert_article(
+                {
+                    "canonical_url": f"https://{domain}/story-{idx}",
+                    "url_hash": f"hash-domain-{idx}",
+                    "title": f"Story from {domain}",
+                    "summary": "Domain filter option",
+                    "published_at": "2026-06-16T12:00:00Z",
+                    "fetched_at": "2026-06-16T12:05:00Z",
+                    "source_domain": domain,
+                    "raw_source": "test",
+                },
+                skip_dedup=True,
+            )
+
+    response = client.get("/api/news/source-domains?limit=10")
+    assert response.status_code == 200
+    domains = response.get_json()["domains"]
+    assert "reuters.com" in domains
+    assert "cnbc.com" in domains
+    assert domains.index("reuters.com") < domains.index("cnbc.com")
+
+
 def test_news_clusters_route(app, client):
     with app.app_context():
         repo = Repository(get_db())

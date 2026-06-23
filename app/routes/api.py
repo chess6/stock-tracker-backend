@@ -141,6 +141,13 @@ def news_feed():
     return jsonify(payload)
 
 
+@api_bp.route("/news/source-domains", methods=["GET"])
+def news_source_domains():
+    limit = min(max(int(request.args.get("limit", 100)), 1), 500)
+    domains = get_repo().list_news_source_domains(limit=limit)
+    return jsonify({"domains": domains})
+
+
 @api_bp.route("/news/clusters", methods=["GET"])
 def news_clusters():
     from ..services.article_cluster import build_cluster_response

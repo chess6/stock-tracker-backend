@@ -2501,6 +2501,23 @@ class Repository:
             )
         return {"articles": articles, "total": total, "limit": limit, "offset": offset, "sort": sort}
 
+    def list_news_source_domains(self, *, limit: int = 100) -> list[str]:
+        limit = min(max(limit, 1), 500)
+        rows = self.conn.execute(
+            """
+            SELECT source_domain
+            FROM articles
+            WHERE duplicate_of_article_id IS NULL
+              AND source_domain IS NOT NULL
+              AND TRIM(source_domain) != ''
+            GROUP BY source_domain
+            ORDER BY COUNT(*) DESC, source_domain ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [row["source_domain"] for row in rows]
+
     def get_company_news(self, ticker: str, limit: int = 25) -> list[dict]:
         display_clause, display_params = _news_display_match_clause("ac")
         rows = self.conn.execute(
