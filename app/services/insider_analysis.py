@@ -281,7 +281,7 @@ def build_insider_conviction_alerts(
     """Surface recent insider clusters with optional fundamentals context."""
     cutoff = (_today() - timedelta(days=window_days)).isoformat()
     clusters = repo.fetch_insider_cluster_rankings(limit=max(limit * 3, limit))
-    alerts: list[dict[str, Any]] = []
+    alerts_by_ticker: dict[str, dict[str, Any]] = {}
 
     for cluster in clusters:
         intensity = float(cluster.get("intensityScore") or 0.0)
@@ -303,7 +303,7 @@ def build_insider_conviction_alerts(
         if score_improving and prior_score is not None and current_score is not None:
             context_parts.append(f"Piotroski {prior_score}→{current_score}")
 
-        alerts.append({
+        alert = {
             "ticker": ticker,
             "companyName": cluster.get("companyName"),
             "clusterDetectedAt": window_end or cluster.get("windowStart"),
@@ -315,9 +315,20 @@ def build_insider_conviction_alerts(
             "priorPiotroski": prior_score,
             "currentPiotroski": current_score,
             "context": "; ".join(context_parts),
-        })
-        if len(alerts) >= limit:
+        }
+        existing = alerts_by_ticker.get(ticker)
+        if existing is None:
+            alerts_by_ticker[ticker] = alert
+        else:
+            existing_date = existing.get("clusterDetectedAt") or ""
+            candidate_date = alert.get("clusterDetectedAt") or ""
+            if candidate_date > existing_date:
+                alerts_by_ticker[ticker] = alert
+
+        if len(alerts_by_ticker) >= limit:
             break
+
+    alerts = list(alerts_by_ticker.values())
 
     return {
         "meta": {

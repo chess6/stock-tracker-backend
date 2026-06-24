@@ -112,12 +112,15 @@ def semantic_similarity(left: str, right: str) -> float:
     return float(fuzz.token_set_ratio(left, right))
 
 
+DEFAULT_SEMANTIC_THRESHOLD = 88
+
+
 def find_semantic_duplicate(
     title: str,
     summary: str | None,
     candidates: list[dict],
     *,
-    threshold: int = 88,
+    threshold: int = DEFAULT_SEMANTIC_THRESHOLD,
 ) -> int | None:
     fingerprint = dedup_fingerprint(title, summary)
     for candidate in candidates:
@@ -125,3 +128,36 @@ def find_semantic_duplicate(
         if semantic_similarity(fingerprint, candidate_fp) >= threshold:
             return candidate["id"]
     return None
+
+
+def find_semantic_duplicate_indexed(
+    fingerprint: str,
+    candidate_fingerprints: list[str],
+    candidate_ids: list[int],
+    *,
+    threshold: int = DEFAULT_SEMANTIC_THRESHOLD,
+) -> int | None:
+    """Match against a precomputed fingerprint index.
+
+    Used by the batch dedup pass so candidate fingerprints are computed once
+    rather than rebuilt on every comparison. Uses rapidfuzz's C-level batch
+    scorer when available, falling back to exact-equality matching otherwise.
+    """
+    if not candidate_fingerprints:
+        return None
+    if fuzz is None:
+        for candidate_fp, candidate_id in zip(candidate_fingerprints, candidate_ids):
+            if candidate_fp == fingerprint:
+                return candidate_id
+        return None
+    from rapidfuzz import process
+
+    match = process.extractOne(
+        fingerprint,
+        candidate_fingerprints,
+        scorer=fuzz.token_set_ratio,
+        score_cutoff=threshold,
+    )
+    if match is None:
+        return None
+    return candidate_ids[match[2]]

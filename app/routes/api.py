@@ -544,28 +544,37 @@ def admin_pipeline_status():
 
 @api_bp.route("/admin/config", methods=["GET"])
 def admin_get_config():
-    from ..services.feature_flags import FLAG_DEFAULTS, resolve_flags
+    from ..services.feature_flags import FLAG_DEFAULTS, flag_sources, resolve_flags
 
     repo = get_repo()
     return jsonify({
         "flags": resolve_flags(repo),
         "defaults": FLAG_DEFAULTS,
         "stored": repo.get_all_config(),
+        "sources": flag_sources(repo),
     })
 
 
 @api_bp.route("/admin/config", methods=["POST"])
 def admin_set_config():
-    from ..services.feature_flags import KNOWN_FLAGS, resolve_flags
+    from ..services.feature_flags import KNOWN_FLAGS, _env_override, flag_sources, resolve_flags
 
     body = request.get_json(silent=True) or {}
     repo = get_repo()
     updated: list[str] = []
+    skipped_env: list[str] = []
     for key, value in body.items():
-        if key in KNOWN_FLAGS:
-            repo.set_config(key, bool(value))
-            updated.append(key)
-    return jsonify({"updated": updated, "flags": resolve_flags(repo)})
+        if key not in KNOWN_FLAGS:
+            continue
+        if _env_override(key) is not None:
+            skipped_env.append(key)
+            continue
+        repo.set_config(key, bool(value))
+        updated.append(key)
+    payload = {"updated": updated, "flags": resolve_flags(repo), "sources": flag_sources(repo)}
+    if skipped_env:
+        payload["skipped_env_locked"] = skipped_env
+    return jsonify(payload)
 
 
 @api_bp.route("/admin/universes", methods=["GET"])

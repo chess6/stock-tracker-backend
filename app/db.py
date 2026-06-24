@@ -618,6 +618,9 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_articles_event_cluster_id ON articles(event_cluster_id)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_articles_content_hash ON articles(content_hash)"
+    )
 
     conn.execute(
         """
@@ -887,6 +890,49 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_saved_screens_updated
         ON saved_screens(updated_at DESC)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS catalyst_calendar (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            event_type TEXT NOT NULL DEFAULT 'earnings',
+            event_date TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'derived',
+            confidence REAL,
+            details_json TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (ticker, event_type, event_date)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_catalyst_calendar_date
+        ON catalyst_calendar(event_date)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS short_interest_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            settlement_date TEXT NOT NULL,
+            short_interest REAL,
+            avg_daily_volume REAL,
+            days_to_cover REAL,
+            source TEXT NOT NULL DEFAULT 'finra',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (ticker, settlement_date, source)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_short_interest_ticker_date
+        ON short_interest_snapshots(ticker, settlement_date DESC)
         """
     )
 

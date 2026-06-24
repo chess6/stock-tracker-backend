@@ -9,6 +9,7 @@ from .logging_config import setup_logging
 from .middleware import register_request_logging
 from .routes.api import api_bp
 from .routes.research import research_bp
+from .routes.signals import signals_bp
 
 
 def create_app(config: Config | None = None) -> Flask:
@@ -24,4 +25,5 @@ def create_app(config: Config | None = None) -> Flask:
     init_db_app(app)
     app.register_blueprint(api_bp)
     app.register_blueprint(research_bp)
+    app.register_blueprint(signals_bp)
     return app

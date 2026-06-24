@@ -48,6 +48,8 @@ def test_pipeline_tables_migrate(tmp_path):
         }
         assert "event_type" in queue_cols
         assert "dismissed" in queue_cols
+        assert "catalyst_calendar" in tables
+        assert "short_interest_snapshots" in tables
     finally:
         conn.close()
 

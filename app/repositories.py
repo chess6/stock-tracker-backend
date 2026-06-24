@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from .db import retry_on_sqlite_lock
@@ -1678,6 +1678,105 @@ class Repository:
             output.append(cluster)
         return output
 
+    def fetch_tickers_with_fundamentals(self, tickers: list[str]) -> set[str]:
+        if not tickers:
+            return set()
+        placeholders = ",".join("?" for _ in tickers)
+        rows = self.conn.execute(
+            f"""
+            SELECT DISTINCT c.ticker
+            FROM companies c
+            JOIN company_scores cs ON cs.company_id = c.id
+            WHERE c.ticker IN ({placeholders})
+            """,
+            [t.upper() for t in tickers],
+        ).fetchall()
+        return {row["ticker"].upper() for row in rows if row["ticker"]}
+
+    def fetch_portfolio_tickers(self) -> set[str]:
+        portfolio = self.get_watchlist("Portfolio")
+        if not portfolio:
+            return set()
+        return {t.upper() for t in (portfolio.get("tickers") or []) if t}
+
+    def fetch_abnormal_returns_for_articles(self, article_ids: list[int]) -> dict[int, float]:
+        if not article_ids:
+            return {}
+        placeholders = ",".join("?" for _ in article_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT article_id, abnormal_return_1d
+            FROM article_market_reactions
+            WHERE article_id IN ({placeholders})
+              AND abnormal_return_1d IS NOT NULL
+            """,
+            article_ids,
+        ).fetchall()
+        return {
+            int(row["article_id"]): float(row["abnormal_return_1d"])
+            for row in rows
+            if row["article_id"] is not None and row["abnormal_return_1d"] is not None
+        }
+
+    def fetch_recent_edgar_signals(
+        self,
+        *,
+        limit: int = 100,
+        max_age_days: int = 30,
+    ) -> list[dict]:
+        cutoff = (date.today() - timedelta(days=max_age_days)).isoformat()
+        rows = self.conn.execute(
+            """
+            SELECT
+                c.ticker,
+                c.name AS company_name,
+                e.event_type AS signal_type,
+                e.filed_date AS event_date,
+                e.form_type,
+                e.item_number,
+                e.summary,
+                e.accession,
+                'edgar_event' AS source
+            FROM company_edgar_events e
+            JOIN companies c ON c.id = e.company_id
+            WHERE e.filed_date >= ?
+            UNION ALL
+            SELECT
+                c.ticker,
+                c.name AS company_name,
+                'going_concern_8k' AS signal_type,
+                f.filed_date AS event_date,
+                '10-K' AS form_type,
+                NULL AS item_number,
+                COALESCE(f.details, 'going concern flag') AS summary,
+                f.accession,
+                'edgar_flag' AS source
+            FROM company_edgar_flags f
+            JOIN companies c ON c.id = f.company_id
+            WHERE f.flag_type = 'going_concern'
+              AND f.active = 1
+              AND COALESCE(f.filed_date, '') >= ?
+            UNION ALL
+            SELECT
+                c.ticker,
+                c.name AS company_name,
+                'activist_13d' AS signal_type,
+                a.filed_date AS event_date,
+                a.form_type,
+                NULL AS item_number,
+                COALESCE(a.summary, a.filer_name) AS summary,
+                a.accession,
+                'activist_filing' AS source
+            FROM company_activist_filings a
+            JOIN companies c ON c.id = a.company_id
+            WHERE a.filed_date >= ?
+            ORDER BY event_date DESC
+            LIMIT ?
+            """,
+            (cutoff, cutoff, cutoff, max(1, int(limit))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     @staticmethod
     def _format_cluster_row(row: sqlite3.Row) -> dict:
         return {
@@ -1957,7 +2056,7 @@ class Repository:
         return updated
 
     def deduplicate_articles(self, lookback: int = 2000) -> dict:
-        from .services.article_dedup import find_semantic_duplicate
+        from .services.article_dedup import dedup_fingerprint, find_semantic_duplicate_indexed
 
         exact_dupes = self.conn.execute(
             """
@@ -2004,23 +2103,27 @@ class Repository:
         rows = self.conn.execute(
             """
             SELECT id, title, summary
-            FROM articles
-            WHERE duplicate_of_article_id IS NULL
+            FROM (
+                SELECT id, title, summary
+                FROM articles
+                WHERE duplicate_of_article_id IS NULL
+                ORDER BY id DESC
+                LIMIT ?
+            )
             ORDER BY id ASC
-            LIMIT ?
             """,
             (lookback,),
         ).fetchall()
-        canonical: list[dict] = []
-        fuzzy_window = 50
+        canonical_ids: list[int] = []
+        canonical_fps: list[str] = []
         marked = 0
         for row in rows:
             article = dict(row)
-            recent_canonical = canonical[-fuzzy_window:] if len(canonical) > fuzzy_window else canonical
-            duplicate_id = find_semantic_duplicate(
-                article["title"],
-                article.get("summary"),
-                recent_canonical,
+            fingerprint = dedup_fingerprint(article["title"], article.get("summary"))
+            duplicate_id = find_semantic_duplicate_indexed(
+                fingerprint,
+                canonical_fps,
+                canonical_ids,
             )
             if duplicate_id is not None:
                 self.conn.execute(
@@ -2029,7 +2132,8 @@ class Repository:
                 )
                 marked += 1
             else:
-                canonical.append(article)
+                canonical_ids.append(article["id"])
+                canonical_fps.append(fingerprint)
         self.commit()
         return {
             "scanned": len(rows),
@@ -2037,7 +2141,7 @@ class Repository:
             "simhashDuplicates": simhash_dupes,
             "fuzzyDuplicates": marked,
             "markedDuplicates": exact_dupes + simhash_dupes + marked,
-            "uniqueRemaining": len(canonical),
+            "uniqueRemaining": len(canonical_ids),
         }
 
     def upsert_article(self, article: dict, *, skip_dedup: bool = False, defer_commit: bool = False) -> int:

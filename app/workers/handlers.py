@@ -165,6 +165,12 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         tickers = payload.get("tickers")
         return ctx.finra_short_interest.refresh_short_interest(tickers)
 
+    def refresh_catalyst_calendar(payload: dict) -> dict:
+        from ..services.catalyst_calendar import refresh_derived_catalyst_calendar
+
+        limit = int(payload.get("limit", 500))
+        return refresh_derived_catalyst_calendar(ctx.repo, limit=limit)
+
     def enrich_metadata(payload: dict) -> dict:
         if payload.get("all_missing"):
             return ctx.fundamentals.enrich_company_metadata(None, all_missing=True)
@@ -273,6 +279,7 @@ def build_handlers(ctx: JobContext) -> dict[str, Callable[[dict], dict]]:
         "refresh_edgar_events": refresh_edgar_events,
         "refresh_supporting_edgar": refresh_supporting_edgar,
         "refresh_short_interest": refresh_short_interest,
+        "refresh_catalyst_calendar": refresh_catalyst_calendar,
         "extract_articles": extract_articles,
         "enrich_articles": enrich_articles,
         "cluster_articles": cluster_articles,

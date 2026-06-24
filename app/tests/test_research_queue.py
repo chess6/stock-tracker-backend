@@ -66,6 +66,77 @@ def test_rank_change_detector_creates_queue_item(app):
         assert any(item["eventType"] == "rank_up" for item in items)
 
 
+def test_insider_cluster_detector_keeps_latest_window_per_ticker(app):
+    with app.app_context():
+        repo = Repository(get_db())
+        company = _seed_company(repo, "INSQ")
+        today = date.today()
+        repo.upsert_insider_cluster_analysis(
+            company["id"],
+            [
+                {
+                    "window_start": (today - timedelta(days=28)).isoformat(),
+                    "window_end": (today - timedelta(days=14)).isoformat(),
+                    "buy_count": 3,
+                    "sell_count": 0,
+                    "unique_buyers": 2,
+                    "total_buy_value": 120000.0,
+                    "total_sell_value": 0.0,
+                    "avg_buy_price": 50.0,
+                    "intensity_score": 0.55,
+                },
+                {
+                    "window_start": (today - timedelta(days=14)).isoformat(),
+                    "window_end": today.isoformat(),
+                    "buy_count": 4,
+                    "sell_count": 0,
+                    "unique_buyers": 3,
+                    "total_buy_value": 180000.0,
+                    "total_sell_value": 0.0,
+                    "avg_buy_price": 52.0,
+                    "intensity_score": 0.65,
+                },
+            ],
+        )
+        events = _detect_new_insider_clusters(repo)
+        insider_events = [
+            event for event in events if event["ticker"] == "INSQ"
+        ]
+        assert len(insider_events) == 1
+        assert insider_events[0]["details"]["intensityScore"] == 0.65
+
+
+def test_get_catalyst_feed_does_not_rebuild_queue(app, monkeypatch):
+    with app.app_context():
+        repo = Repository(get_db())
+        _enable_queue_flag(repo)
+        event_date = date.today().isoformat()
+        repo.upsert_research_queue_items(
+            [
+                {
+                    "ticker": "CAT1",
+                    "event_type": "new_catalyst",
+                    "event_date": event_date,
+                    "priority": 30,
+                    "details": {"catalystType": "earnings_beat"},
+                }
+            ]
+        )
+        calls: list[int] = []
+
+        def _spy(*args, **kwargs):
+            calls.append(1)
+            return {"detected": 0, "upserted": 0, "returned": 0, "items": []}
+
+        from app.services import research_queue as research_queue_module
+
+        monkeypatch.setattr(research_queue_module, "build_research_queue", _spy)
+        payload = research_queue_module.get_catalyst_feed(repo, limit=10)
+        assert calls == []
+        assert payload["returned"] >= 1
+        assert any(item["ticker"] == "CAT1" for item in payload["items"])
+
+
 def test_insider_cluster_detector(app):
     with app.app_context():
         repo = Repository(get_db())

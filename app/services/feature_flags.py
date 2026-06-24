@@ -21,6 +21,7 @@ FLAG_DEFAULTS: dict[str, bool] = {
     "experimental_backtest_route": False,
     "experimental_insider_alerts": False,
     "experimental_narrative_alerts": False,
+    "experimental_signals": False,
 }
 
 KNOWN_FLAGS = frozenset(FLAG_DEFAULTS)
@@ -32,6 +33,19 @@ def _env_override(key: str) -> bool | None:
     if raw is None:
         return None
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def flag_sources(repo: Repository | None = None) -> dict[str, str]:
+    """Per-flag resolution source: env, sqlite, or default."""
+    sources: dict[str, str] = {}
+    for key in KNOWN_FLAGS:
+        if _env_override(key) is not None:
+            sources[key] = "env"
+        elif repo is not None and repo.get_config(key) is not None:
+            sources[key] = "sqlite"
+        else:
+            sources[key] = "default"
+    return sources
 
 
 def is_enabled(key: str, repo: Repository | None = None) -> bool:

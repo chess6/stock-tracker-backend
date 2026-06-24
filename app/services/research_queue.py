@@ -116,25 +116,36 @@ def _detect_new_insider_clusters(repo: Repository, *, window_days: int = 14) -> 
     ).fetchall()
 
     events: list[dict[str, Any]] = []
+    best_by_ticker: dict[str, dict[str, Any]] = {}
     for row in rows:
         intensity = float(row["intensity_score"] or 0)
         event_date = (row["window_end"] or row["computed_at"] or cutoff)[:10]
-        events.append(
-            {
-                "ticker": row["ticker"],
-                "event_type": "new_insider_cluster",
-                "event_date": event_date,
-                "priority": max(10, int(40 - intensity * 30)),
-                "details": {
-                    "windowStart": row["window_start"],
-                    "windowEnd": row["window_end"],
-                    "intensityScore": intensity,
-                    "buyCount": row["buy_count"],
-                    "uniqueBuyers": row["unique_buyers"],
-                    "totalBuyValue": row["total_buy_value"],
-                },
-            }
-        )
+        ticker = row["ticker"]
+        candidate = {
+            "ticker": ticker,
+            "event_type": "new_insider_cluster",
+            "event_date": event_date,
+            "priority": max(10, int(40 - intensity * 30)),
+            "details": {
+                "windowStart": row["window_start"],
+                "windowEnd": row["window_end"],
+                "intensityScore": intensity,
+                "buyCount": row["buy_count"],
+                "uniqueBuyers": row["unique_buyers"],
+                "totalBuyValue": row["total_buy_value"],
+            },
+        }
+        existing = best_by_ticker.get(ticker)
+        if existing is None:
+            best_by_ticker[ticker] = candidate
+            continue
+        existing_intensity = float((existing.get("details") or {}).get("intensityScore") or 0)
+        existing_date = existing.get("event_date") or ""
+        if intensity > existing_intensity or (
+            intensity == existing_intensity and event_date > existing_date
+        ):
+            best_by_ticker[ticker] = candidate
+    events.extend(best_by_ticker.values())
     return events
 
 
@@ -372,7 +383,6 @@ def get_catalyst_feed(
     if not is_enabled("experimental_research_queue", repo):
         return {"returned": 0, "items": [], "skipped": True, "reason": "feature_flag_disabled"}
 
-    build_research_queue(repo, limit=limit)
     event_types = ["new_catalyst", "thesis_catalyst"]
     items = repo.fetch_research_queue(limit=limit, event_types=event_types, dismissed=False)
     enriched: list[dict[str, Any]] = []

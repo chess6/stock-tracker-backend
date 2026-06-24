@@ -23,6 +23,19 @@ def test_feature_flags_env_override(monkeypatch):
     assert embeddings_default_enabled() is True
 
 
+def test_flag_sources_marks_env_and_sqlite(app, monkeypatch):
+    monkeypatch.setenv("STOCK_TRACKER_FF_EXPERIMENTAL_SIGNALS", "true")
+    with app.app_context():
+        from app.db import get_db
+        from app.services.feature_flags import flag_sources
+
+        repo = Repository(get_db())
+        repo.set_config("experimental_research_queue", True)
+        sources = flag_sources(repo)
+        assert sources["experimental_signals"] == "env"
+        assert sources["experimental_research_queue"] == "sqlite"
+
+
 def test_feature_flags_sqlite_override(app):
     with app.app_context():
         from app.db import get_db
@@ -79,6 +92,7 @@ def test_admin_config_routes(app, client):
     assert get_resp.status_code == 200
     payload = get_resp.get_json()
     assert "flags" in payload
+    assert "sources" in payload
     assert payload["flags"]["experimental_composite_rank"] is True
 
     post_resp = client.post(
@@ -89,3 +103,4 @@ def test_admin_config_routes(app, client):
     post_payload = post_resp.get_json()
     assert post_payload["updated"] == ["experimental_composite_rank"]
     assert post_payload["flags"]["experimental_composite_rank"] is True
+    assert "sources" in post_payload

@@ -36,6 +36,7 @@ def enqueue_scheduled_jobs(database_path: str, tickers: list[str]) -> None:
     def _enqueue(repo: Repository) -> None:
         repo.enqueue_job("sync_companies", {}, priority=10)
         repo.enqueue_job("refresh_fundamentals", {"tickers": tickers}, priority=20)
+        repo.enqueue_job("refresh_catalyst_calendar", {"limit": 500}, priority=21)
         repo.enqueue_job("refresh_prices", {"tickers": tickers, "days": 1825}, priority=30)
         repo.enqueue_job("refresh_company_scores", {"all": True}, priority=32)
         repo.enqueue_job("snapshot_composite_ranks", {"universe": "sp500"}, priority=34)
@@ -44,6 +45,7 @@ def enqueue_scheduled_jobs(database_path: str, tickers: list[str]) -> None:
         repo.enqueue_job("enrich_metadata", {"all_missing": True}, priority=33)
         repo.enqueue_job("refresh_macro", {}, priority=35)
         repo.enqueue_job("refresh_insiders", {"tickers": tickers}, priority=40)
+        repo.enqueue_job("refresh_short_interest", {"tickers": tickers}, priority=41)
         repo.enqueue_job(
             "ingest_default_feeds",
             {"extract_articles": False, "max_articles_per_feed": 10, "force_refresh": True},

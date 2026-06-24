@@ -165,6 +165,47 @@ def test_build_insider_conviction_alerts_filters_by_intensity(app):
         assert "CLUS" in tickers
 
 
+def test_build_insider_conviction_alerts_dedupes_by_ticker(app):
+    from app.db import get_db
+    from app.repositories import Repository
+
+    with app.app_context():
+        repo = Repository(get_db())
+        repo.upsert_companies([{"ticker": "CLUS", "name": "Cluster Co"}])
+        company = repo.get_company_by_ticker("CLUS")
+        repo.upsert_insider_cluster_analysis(
+            company["id"],
+            [
+                {
+                    "window_start": "2026-05-01",
+                    "window_end": "2026-05-31",
+                    "buy_count": 3,
+                    "sell_count": 0,
+                    "unique_buyers": 3,
+                    "total_buy_value": 1_000_000.0,
+                    "total_sell_value": 0.0,
+                    "avg_buy_price": 10.0,
+                    "intensity_score": 0.6,
+                },
+                {
+                    "window_start": "2026-06-01",
+                    "window_end": "2026-06-20",
+                    "buy_count": 5,
+                    "sell_count": 0,
+                    "unique_buyers": 4,
+                    "total_buy_value": 2_500_000.0,
+                    "total_sell_value": 0.0,
+                    "avg_buy_price": 10.0,
+                    "intensity_score": 0.75,
+                },
+            ],
+        )
+        payload = build_insider_conviction_alerts(repo, min_intensity=0.3, limit=10)
+        clus_alerts = [item for item in payload["alerts"] if item["ticker"] == "CLUS"]
+        assert len(clus_alerts) == 1
+        assert clus_alerts[0]["clusterDetectedAt"] == "2026-06-20"
+
+
 def test_insider_alerts_route_disabled_without_flag(app, client):
     response = client.get("/api/research/insider-alerts")
     assert response.status_code == 404
