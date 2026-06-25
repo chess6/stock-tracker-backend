@@ -14,6 +14,7 @@ from ..services.signal_state import (
     update_signal_item_state,
 )
 from ..services.signals import get_signals
+from ..services.watch_digest import build_portfolio_watch_digest
 
 signals_bp = Blueprint("signals", __name__, url_prefix="/api")
 
@@ -122,6 +123,8 @@ def _fetch_signals_payload(repo: Repository, params: dict) -> dict:
         hide_snoozed=params["hide_snoozed"],
     )
     payload["userState"] = {"lastVisitedAt": state.get("lastVisitedAt")}
+    if params.get("lens") == "watch":
+        payload["digest"] = build_portfolio_watch_digest(repo, payload.get("items") or [])
     return payload
 
 
