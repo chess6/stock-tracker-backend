@@ -75,6 +75,9 @@ class Repository:
         output = {}
         for table in tables:
             output[table] = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        output["edgar_events"] = self.conn.execute(
+            "SELECT COUNT(*) FROM company_edgar_events"
+        ).fetchone()[0]
         return output
 
     def status_snapshot(self) -> dict:
@@ -90,6 +93,17 @@ class Repository:
             "insidersUpdatedAt": self.conn.execute("SELECT MAX(created_at) FROM insider_transactions").fetchone()[0],
             "insiderClustersUpdatedAt": self.conn.execute(
                 "SELECT MAX(computed_at) FROM insider_cluster_analysis"
+            ).fetchone()[0],
+            "edgarEventsUpdatedAt": self.conn.execute(
+                """
+                SELECT MAX(ts) FROM (
+                    SELECT MAX(created_at) AS ts FROM company_edgar_events
+                    UNION ALL
+                    SELECT MAX(updated_at) AS ts FROM company_edgar_flags
+                    UNION ALL
+                    SELECT MAX(created_at) AS ts FROM company_activist_filings
+                )
+                """
             ).fetchone()[0],
         }
         coverage = {

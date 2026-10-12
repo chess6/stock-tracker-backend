@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import date
 
 from ..clients.sec import SecClient
 
@@ -265,9 +266,48 @@ def infer_dimension(form: str | None, fp: str | None) -> tuple[str | None, str |
     return None, None
 
 
+# Fiscal quarters span ~13 weeks (91 days; 14-week quarters reach ~98), and fiscal
+# years span ~52 weeks (364 days; 53-week years reach ~371). SEC CompanyFacts reports
+# both the 3-month figure and the cumulative year-to-date figure (6/9-month) for the
+# same period_end on income-statement and cash-flow concepts. We keep only true
+# single-quarter and full-year durations so cumulative YTD values never contaminate ARQ.
+_QUARTER_MIN_DAYS = 80
+_QUARTER_MAX_DAYS = 100
+_ANNUAL_MIN_DAYS = 340
+_ANNUAL_MAX_DAYS = 380
+
+
+def _duration_days(start: str | None, end: str | None) -> int | None:
+    if not start or not end:
+        return None
+    try:
+        return (date.fromisoformat(end) - date.fromisoformat(start)).days
+    except ValueError:
+        return None
+
+
+def classify_period(observation: dict) -> tuple[str | None, str | None]:
+    """Resolve (period_type, dimension) for an SEC observation.
+
+    Duration concepts (income statement / cash flow) carry a ``start`` date; classify
+    them by elapsed days so cumulative year-to-date observations are rejected. Instant
+    concepts (balance sheet, shares) have no ``start`` and fall back to form/fp inference.
+    """
+    duration = _duration_days(observation.get("start"), observation.get("end"))
+    if duration is not None:
+        if _QUARTER_MIN_DAYS <= duration <= _QUARTER_MAX_DAYS:
+            return "quarterly", "ARQ"
+        if _ANNUAL_MIN_DAYS <= duration <= _ANNUAL_MAX_DAYS:
+            return "annual", "ARY"
+        return None, None
+    return infer_dimension(observation.get("form"), observation.get("fp"))
+
+
 def _observation_record(company_id: int, metric: str, config: dict, concept: str, unit_name: str, observation: dict) -> dict | None:
-    period_type, dimension = infer_dimension(observation.get("form"), observation.get("fp"))
-    if not period_type or not observation.get("end"):
+    if not observation.get("end"):
+        return None
+    period_type, dimension = classify_period(observation)
+    if not period_type:
         return None
     value = observation.get("val")
     if value is None:

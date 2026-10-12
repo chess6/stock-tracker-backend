@@ -10,6 +10,7 @@ from ..db import get_db
 from ..repositories import Repository
 from ..services.fundamentals import FundamentalsService
 from ..services.insiders import InsidersService
+from ..services.edgar_ingestion import EdgarIngestionService
 from ..services.news import NewsService
 from ..services.prices import PricesService
 from ..services.ticker_universes import chunk_tickers, get_universe, get_universe_tickers, list_universes
@@ -64,6 +65,19 @@ def get_prices_service() -> PricesService:
 
 def get_insiders_service() -> InsidersService:
     return InsidersService(get_repo(), get_sec_client())
+
+
+def get_edgar_service(
+    *,
+    max_filings_per_company: int | None = None,
+    max_total_requests: int | None = None,
+) -> EdgarIngestionService:
+    kwargs: dict = {}
+    if max_filings_per_company is not None:
+        kwargs["max_filings_per_company"] = max_filings_per_company
+    if max_total_requests is not None:
+        kwargs["max_total_requests"] = max_total_requests
+    return EdgarIngestionService(get_repo(), get_sec_client(), **kwargs)
 
 
 def _resolve_admin_tickers(*, body: dict | None = None) -> tuple[list[str] | None, str | None]:
@@ -1149,6 +1163,38 @@ def refresh_insiders():
             payload = get_insiders_service().refresh_insiders(tickers)
     except Exception as exc:
         current_app.logger.exception("Insider refresh failed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(payload)
+
+
+@api_bp.route("/admin/refresh-edgar-events", methods=["POST"])
+def refresh_edgar_events():
+    body = request.get_json(silent=True) or {}
+    tickers, universe_error = _resolve_admin_tickers(body=body)
+    if universe_error:
+        return jsonify({"error": universe_error}), 400
+    if not tickers:
+        return jsonify({"error": "No tickers provided (or pass ?universe=sp500)"}), 400
+
+    max_filings = request.args.get("maxFilingsPerCompany", type=int)
+    if max_filings is None:
+        raw_max = body.get("max_filings_per_company") or body.get("maxFilingsPerCompany")
+        if raw_max is not None:
+            max_filings = int(raw_max)
+    max_requests = request.args.get("maxTotalRequests", type=int)
+    if max_requests is None:
+        raw_requests = body.get("max_total_requests") or body.get("maxTotalRequests")
+        if raw_requests is not None:
+            max_requests = int(raw_requests)
+
+    try:
+        service = get_edgar_service(
+            max_filings_per_company=max_filings,
+            max_total_requests=max_requests,
+        )
+        payload = service.refresh_edgar_events(tickers)
+    except Exception as exc:
+        current_app.logger.exception("EDGAR events refresh failed")
         return jsonify({"error": str(exc)}), 500
     return jsonify(payload)
 

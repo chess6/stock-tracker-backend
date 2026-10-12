@@ -97,6 +97,82 @@ def test_normalize_company_facts_maps_core_metrics():
     assert metrics[("fcf", "2024-12-31", "ARY")]["value"] == 150.0
 
 
+def test_normalize_company_facts_rejects_cumulative_ytd_quarters():
+    """10-Q income-statement concepts carry both the 3-month and YTD figure for the
+    same period_end; only the single-quarter (≈3-month) value should be stored as ARQ."""
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            # Q2 single quarter (≈3 months)
+                            {
+                                "val": 8_060_000_000,
+                                "fy": 2025,
+                                "fp": "Q2",
+                                "form": "10-Q",
+                                "filed": "2025-03-21",
+                                "start": "2024-11-29",
+                                "end": "2025-02-27",
+                                "accn": "9",
+                            },
+                            # Q2 cumulative year-to-date (≈6 months) — must be rejected
+                            {
+                                "val": 16_762_000_000,
+                                "fy": 2025,
+                                "fp": "Q2",
+                                "form": "10-Q",
+                                "filed": "2025-03-21",
+                                "start": "2024-08-30",
+                                "end": "2025-02-27",
+                                "accn": "9",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+
+    rows = normalize_company_facts(42, payload)
+    revenue = [row for row in rows if row["metric"] == "revenue" and row["dimension"] == "ARQ"]
+    assert len(revenue) == 1
+    assert revenue[0]["value"] == 8_060_000_000
+    assert revenue[0]["period_end"] == "2025-02-27"
+
+
+def test_normalize_company_facts_classifies_full_year_duration_as_annual():
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 25_111_000_000,
+                                "fy": 2024,
+                                "fp": "FY",
+                                "form": "10-K",
+                                "filed": "2024-10-01",
+                                "start": "2023-09-01",
+                                "end": "2024-08-29",
+                                "accn": "1",
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+
+    rows = normalize_company_facts(43, payload)
+    revenue = [row for row in rows if row["metric"] == "revenue"]
+    assert len(revenue) == 1
+    assert revenue[0]["dimension"] == "ARY"
+    assert revenue[0]["value"] == 25_111_000_000
+
+
 def test_normalize_company_facts_derives_opinc_from_gp_and_opex():
     payload = {
         "facts": {
