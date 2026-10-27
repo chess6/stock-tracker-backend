@@ -1,5 +1,6 @@
 .backend.pid
 .worker.pid
+.scheduler.pid
 .orchestrator.pid
 .orchestrator_api.pid
 *.out

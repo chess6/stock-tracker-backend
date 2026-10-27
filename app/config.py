@@ -4,6 +4,17 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "AMD", "GOOGL", "AMZN", "META", "TSLA"]
+
+
+def default_tickers() -> list[str]:
+    """Tickers for scheduled ETL, from STOCK_TRACKER_DEFAULT_TICKERS or the built-in list."""
+    return [
+        item.strip().upper()
+        for item in os.getenv("STOCK_TRACKER_DEFAULT_TICKERS", ",".join(DEFAULT_TICKERS)).split(",")
+        if item.strip()
+    ]
+
 
 @dataclass
 class Config:

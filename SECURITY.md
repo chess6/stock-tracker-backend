@@ -27,7 +27,7 @@ We aim to acknowledge reports within **7 days** and will coordinate disclosure o
 
 This project is intended for **local development**:
 
-* Admin API routes are **unauthenticated by default** — set `ADMIN_API_KEY` before exposing the API beyond localhost.
+* Admin API routes are **loopback-only** when `ADMIN_API_KEY` is unset. Set `ADMIN_API_KEY` before exposing the API beyond localhost, and always behind a reverse proxy.
 * Never commit `.env`, API keys, or `data/*.sqlite3` files.
 * `SEC_USER_AGENT` must be a real contact email per [SEC fair access](https://www.sec.gov/os/webmaster-faq#code-support).
 
@@ -35,6 +35,6 @@ This project is intended for **local development**:
 
 If you deploy this API publicly:
 
-1. Set `ADMIN_API_KEY` and require `X-Api-Key` on admin routes.
+1. Set `ADMIN_API_KEY`. Admin routes then require the `X-Api-Key` header.
 2. Run behind a reverse proxy with TLS and rate limiting.
-3. Do not expose the SQLite file or worker shell scripts to untrusted networks.
+3. Do not expose the SQLite file or worker/scheduler shell scripts to untrusted networks.

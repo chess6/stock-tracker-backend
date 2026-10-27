@@ -15,6 +15,7 @@ pip install -r requirements.txt
 cp .env.example .env   # edit SEC_USER_AGENT
 sh start.sh
 sh worker.sh           # optional — background ingestion
+sh scheduler.sh        # optional — nightly ETL + RSS poll
 ```
 
 ## Pull requests

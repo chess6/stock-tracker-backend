@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import functools
+import hmac
+import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 
 from flask import Blueprint, current_app, jsonify, request
@@ -21,16 +23,49 @@ api_bp = Blueprint("api", __name__, url_prefix="/api")
 _MOVERS_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="movers")
 
 
+def _is_loopback(addr: str | None) -> bool:
+    try:
+        ip = ipaddress.ip_address((addr or "").strip())
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return (mapped or ip).is_loopback
+
+
+def _is_local_request() -> bool:
+    """True only if the peer and every forwarded hop are loopback addresses.
+
+    Local dev proxies (CRA ``proxy``) set X-Forwarded-For to the browser's address,
+    so a remote client tunnelled through a local proxy is still rejected.
+    """
+    if not _is_loopback(request.remote_addr):
+        return False
+    if request.headers.get("Forwarded"):
+        return False
+    hops = [hop for hop in request.headers.get("X-Forwarded-For", "").split(",") if hop.strip()]
+    real_ip = request.headers.get("X-Real-Ip")
+    if real_ip:
+        hops.append(real_ip)
+    return all(_is_loopback(hop) for hop in hops)
+
+
 def _check_admin_key():
-    """Return an error response if ADMIN_API_KEY is configured and the request lacks it."""
+    """Return an error response unless the request may use admin routes.
+
+    With ADMIN_API_KEY set, the key is always required. Without it, only local
+    (loopback) requests are allowed.
+    """
     expected = current_app.config.get("ADMIN_API_KEY")
     if not expected:
-        return None
+        if _is_local_request():
+            return None
+        return jsonify({"error": "Admin routes are localhost-only unless ADMIN_API_KEY is set"}), 403
     provided = (
         request.headers.get("X-Api-Key")
         or request.args.get("apiKey")
+        or ""
     )
-    if provided == expected:
+    if hmac.compare_digest(provided.encode(), expected.encode()):
         return None
     return jsonify({"error": "Unauthorized — set X-Api-Key header or apiKey query param"}), 401
 

@@ -36,3 +36,29 @@ def test_build_research_queue_job_enqueued_on_schedule(tmp_path):
         assert claimed["job_type"] == "build_research_queue"
     finally:
         conn.close()
+
+
+def test_scheduler_registers_jobs_and_enqueues(tmp_path):
+    from scheduler import build_scheduler, enqueue_feed_poll, enqueue_scheduled_jobs
+
+    db_path = str(tmp_path / "sched.sqlite3")
+    init_db(db_path)
+
+    scheduler = build_scheduler(db_path, ["AAPL"])
+    assert {job.id for job in scheduler.get_jobs()} == {"nightly_etl", "rss_poll"}
+
+    enqueue_scheduled_jobs(db_path, ["AAPL"])
+    enqueue_feed_poll(db_path)
+    conn = connect_db(db_path)
+    try:
+        job_types = [row["job_type"] for row in conn.execute("SELECT job_type FROM ingestion_jobs")]
+    finally:
+        conn.close()
+    assert "refresh_fundamentals" in job_types
+    assert job_types.count("ingest_default_feeds") == 2
+
+
+def test_worker_does_not_start_scheduler():
+    import worker
+
+    assert not hasattr(worker, "BackgroundScheduler")

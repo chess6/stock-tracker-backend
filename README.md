@@ -19,8 +19,9 @@ Local-data-first: admin/bootstrap endpoints fill SQLite; the UI reads from cache
 | API entry | `api.py` |
 | Routes & services | `app/` |
 | SQLite DB | `data/stock_tracker.sqlite3` |
-| Background worker | `worker.py` |
-| Shell helpers | `start.sh`, `stop.sh`, `worker.sh`, `worker_stop.sh`, `bootstrap.sh`, `refresh_data.sh` |
+| Background worker | `worker.py` (processes `ingestion_jobs`) |
+| Scheduler | `scheduler.py` (enqueues nightly ETL + RSS poll) |
+| Shell helpers | `start.sh`, `stop.sh`, `worker.sh`, `worker_stop.sh`, `scheduler.sh`, `scheduler_stop.sh`, `bootstrap.sh`, `refresh_data.sh` |
 | Capabilities reference | `scripts/capabilities.sh` — env vars, feature flags, worker jobs, research routes |
 | CLI tester | `api_tester.py` |
 | AI orchestrator | `orchestration/` — event-driven agents (see below) |
@@ -80,7 +81,7 @@ Feature flags default **OFF**. Resolution order:
 
 **ENV (`STOCK_TRACKER_FF_<KEY>`) → SQLite `app_config` → default (False)**
 
-ENV always wins over SQLite. After changing `.env`, restart the API and worker.
+ENV always wins over SQLite. After changing `.env`, restart the API, worker, and scheduler.
 
 ### Capabilities script
 
@@ -132,11 +133,11 @@ Or set all in `.env` (see `.env.example` for `STOCK_TRACKER_FF_*` keys).
 |----------|---------|
 | `SEC_USER_AGENT` | **Required** — real contact email for SEC fair-access |
 | `STOCK_TRACKER_DB_PATH` | SQLite path (default: `data/stock_tracker.sqlite3`) |
-| `STOCK_TRACKER_DEFAULT_TICKERS` | Comma-separated tickers for worker nightly ETL |
+| `STOCK_TRACKER_DEFAULT_TICKERS` | Comma-separated tickers for scheduler nightly ETL |
 | `STOCK_TRACKER_REQUEST_TIMEOUT` | HTTP timeout for SEC/news (default: 20) |
 | `STOCK_TRACKER_LOG_DIR` | Log directory (default: `logs/`) |
 | `NLP_DEVICE` | `auto` (default), `cpu`, or `cuda` for FinBERT/embeddings |
-| `ADMIN_API_KEY` | When set, admin routes require `X-Admin-Api-Key` header |
+| `ADMIN_API_KEY` | When set, admin routes require `X-Api-Key` header (or `apiKey` query param). When unset, admin routes are loopback-only |
 | `NASDAQ_API_KEY` | Optional Nasdaq Data Link fallback when cache is empty |
 | `GUNICORN_BIND`, `GUNICORN_WORKERS`, `GUNICORN_THREADS`, `GUNICORN_TIMEOUT` | Production API tuning (`gunicorn.conf.py`) |
 
@@ -146,7 +147,7 @@ Flags alone do not fully populate the system. For the fullest local setup:
 
 1. `./scripts/capabilities.sh flags` — confirm resolved flag state
 2. Enable desired flags (SQLite, `.env`, or `POST /api/admin/config`)
-3. Restart API and worker: `sh stop.sh && sh start.sh` and `sh worker_stop.sh && sh worker.sh`
+3. Restart API and worker: `sh stop.sh && sh start.sh` and `sh worker_stop.sh && sh worker.sh` (and `sh scheduler_stop.sh && sh scheduler.sh` if the change affects scheduled jobs)
 4. Load data: `sh bootstrap.sh` or `sh refresh_data.sh`
 5. Enrich articles: `./enrich_articles.sh` (avoid `FAST=1` for full NLP)
 6. Backfill market reactions for research narrative: `./backfill_market_reactions.sh AAPL,MSFT`
@@ -191,16 +192,21 @@ sh start.sh
 
 Always use `start.sh` / `stop.sh` — running `python3 api.py` directly leaves no PID file.
 
-## Background worker
+## Background worker and scheduler
 
-Polls RSS every 45 minutes; nightly full ETL at 02:00.
+Two separate processes:
+
+- **Worker** (`worker.py`) claims and runs jobs from the `ingestion_jobs` table. Safe to run more than one.
+- **Scheduler** (`scheduler.py`) enqueues the RSS poll every 45 minutes and the nightly full ETL at 02:00. Run exactly **one** per database, or jobs are enqueued multiple times.
 
 ```bash
 sh worker.sh
-sh worker_stop.sh     # uses .worker.pid
+sh scheduler.sh
+sh worker_stop.sh       # uses .worker.pid
+sh scheduler_stop.sh    # uses .scheduler.pid
 ```
 
-Jobs persist in the `ingestion_jobs` table. Requires the same `.env` / DB path as the API.
+Jobs persist in the `ingestion_jobs` table. Both require the same `.env` / DB path as the API.
 
 Nightly schedule (02:00) enqueues, in priority order:
 
@@ -241,7 +247,12 @@ curl -X POST "http://localhost:5000/api/admin/bootstrap?tickers=JPM,MCD"
 
 ## Admin API reference
 
-All admin routes are unauthenticated — intended for localhost dev only.
+Admin routes (`/api/admin/*`) are protected:
+
+- **`ADMIN_API_KEY` unset:** only loopback requests are allowed (`127.0.0.1` / `::1`, and every `X-Forwarded-For` / `X-Real-Ip` hop must also be loopback). Anything else gets `403`.
+- **`ADMIN_API_KEY` set:** every request needs `X-Api-Key: <key>` (or `?apiKey=`), including local ones. Anything else gets `401`.
+
+Behind a reverse proxy that doesn't forward client addresses, set `ADMIN_API_KEY`. Without client addresses, all traffic looks local.
 
 ### Bootstrap & refresh
 
@@ -278,7 +289,7 @@ curl -X POST http://localhost:5000/api/admin/ingest-feed \
 
 **New install:** `sh start.sh` → `sh bootstrap.sh JPM,MCD`
 
-**Daily refresh:** `sh refresh_data.sh JPM,MCD` or run `sh worker.sh`
+**Daily refresh:** `sh refresh_data.sh JPM,MCD` or run `sh worker.sh` + `sh scheduler.sh`
 
 **Research narrative (sentiment vs price, topEvents):** macro benchmark must exist, then backfill reactions — not `FORCE=1 enrich`:
 
@@ -361,7 +372,7 @@ python -m pytest app/tests/ -q
 - Insider Form 4 parser is limited (many tickers show $0)
 - Intraday endpoint returns empty
 - Some SEC metrics missing per issuer (e.g. MCD cost of revenue)
-- Admin routes have no authentication
+- Admin auth is a single shared key (no users/roles); the browser `/admin` page only works without a key, from localhost
 - Embedding-based dedup not implemented (keyword sentiment only)
 
 ## License

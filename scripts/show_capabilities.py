@@ -67,12 +67,12 @@ FLAG_NOTES: dict[str, str] = {
 ENV_VARS: list[tuple[str, str, str]] = [
     ("SEC_USER_AGENT", "required", "SEC fair-access contact string (real email)."),
     ("STOCK_TRACKER_DB_PATH", "optional", "SQLite database path (default: data/stock_tracker.sqlite3)."),
-    ("STOCK_TRACKER_DEFAULT_TICKERS", "optional", "Comma-separated tickers for worker nightly ETL."),
+    ("STOCK_TRACKER_DEFAULT_TICKERS", "optional", "Comma-separated tickers for scheduler nightly ETL."),
     ("STOCK_TRACKER_REQUEST_TIMEOUT", "optional", "HTTP timeout seconds for SEC/news fetches (default: 20)."),
     ("STOCK_TRACKER_LOG_DIR", "optional", "Log directory (default: stock_tracker_backend/logs)."),
     ("STOCK_TRACKER_FF_<FLAG>", "optional", "Override any feature flag; e.g. STOCK_TRACKER_FF_EXPERIMENTAL_RESEARCH_QUEUE=true"),
     ("NASDAQ_API_KEY", "optional", "Nasdaq Data Link fallback when SQLite company cache is empty."),
-    ("ADMIN_API_KEY", "optional", "When set, admin routes require X-Admin-Api-Key header."),
+    ("ADMIN_API_KEY", "optional", "When set, admin routes require X-Api-Key header; when unset, loopback-only."),
     ("NLP_DEVICE", "optional", "FinBERT/embeddings device: auto (default), cpu, or cuda."),
     ("FLASK_DEBUG", "optional", "Flask dev server debug mode (api.py standalone only)."),
     ("BASE_URL", "optional", "Shell scripts' API base (default: http://localhost:5000)."),
@@ -105,7 +105,8 @@ CLI_TOOLS: list[tuple[str, str]] = [
     ("./refresh_data.sh", "Fundamentals, prices, insiders, feeds refresh."),
     ("./enrich_articles.sh", "Batch article enrichment (FAST=1, RETAG=1, FORCE=1 env toggles)."),
     ("./backfill_market_reactions.sh", "Backfill article market reaction metrics."),
-    ("./worker.sh", "Background ingestion_jobs worker + nightly scheduler (02:00 ETL)."),
+    ("./worker.sh", "Background ingestion_jobs worker."),
+    ("./scheduler.sh", "Scheduler: nightly ETL (02:00) + RSS poll (45 min). Run one per DB."),
     ("python scripts/backtest.py", "Point-in-time composite rank backtest (JSON/CSV output)."),
     ("python scripts/validate_scores.py", "Score validation against verification tickers."),
     ("python scripts/benchmark_refresh.py", "Benchmark company_scores refresh latency."),
@@ -193,7 +194,7 @@ def cmd_enable(repo: Repository, flag: str) -> None:
     print(f"Enabled {flag} in SQLite app_config.")
     print(f"  Resolved now: {is_enabled(flag, repo)}")
     print(f"  Env override: export {_flag_env_key(flag)}=true")
-    print("  Restart worker.sh if build_research_queue / nightly jobs should pick this up.")
+    print("  Restart worker.sh and scheduler.sh if build_research_queue / nightly jobs should pick this up.")
 
 
 def cmd_disable(repo: Repository, flag: str) -> None:
