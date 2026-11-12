@@ -42,6 +42,15 @@ Secrets are checked at three points:
 Rules, including Nasdaq Data Link and Tiingo key formats, live in `.gitleaks.toml`. Run `gitleaks git --redact .` to scan locally. If a secret is ever committed, **rotate it first**; removing it from history does not make it safe again.
 * `SEC_USER_AGENT` must be a real contact email per [SEC fair access](https://www.sec.gov/os/webmaster-faq#code-support).
 
+## Built-in protections
+
+* **CORS allowlist** (`CORS_ORIGINS`): only listed browser origins can read API responses. State-changing requests and all `/api/admin/*` calls carrying another `Origin` are rejected with `403`, so a malicious page cannot drive a local API from your browser.
+* **DNS rebinding:** without `ADMIN_API_KEY`, admin routes also require a local `Host` header (`localhost`, `127.0.0.1`, `::1`, or `ALLOWED_HOSTS`). The orchestrator API (port 5001) applies the same Host and Origin checks (`ORCHESTRATOR_ALLOWED_HOSTS`, `ORCHESTRATOR_CORS_ORIGINS`).
+* **Outbound fetches** of feed and article URLs (`app/services/safe_fetch.py`) allow only http(s), refuse private, loopback, link-local and other non-public addresses on every redirect hop, cap size and total time, and accept only HTML for article pages.
+* **Feed sanitization:** items with non-http(s) links are dropped, and markup (including entity-encoded markup) is stripped from titles and text.
+* **Input validation:** numeric query parameters return `400` instead of `500` and are clamped to safe ranges. Ticker lists are type-checked and normalized before anything is written.
+* The Flask debugger is off unless `FLASK_DEBUG=1`.
+
 ## Safe defaults for public deployments
 
 If you deploy this API publicly:

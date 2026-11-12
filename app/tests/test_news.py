@@ -28,7 +28,7 @@ class FakeSession:
     def __init__(self, mapping: dict[str, str]) -> None:
         self.mapping = mapping
 
-    def get(self, url: str, timeout: int = 20):
+    def get(self, url: str, timeout: int = 20, **_kwargs):
         if url not in self.mapping:
             raise requests.ConnectionError(f"Failed to reach {url}")
         return FakeResponse(self.mapping[url])

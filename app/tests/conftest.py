@@ -28,3 +28,12 @@ def app(tmp_path: Path):
 @pytest.fixture()
 def client(app):
     return app.test_client()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_dns(monkeypatch):
+    """safe_fetch resolves hosts to block internal addresses; tests use fake hosts
+    and fake sessions, so resolve every hostname to a public documentation-safe IP."""
+    from app.services import safe_fetch
+
+    monkeypatch.setattr(safe_fetch, "_resolve_host", lambda host: ["93.184.216.34"])

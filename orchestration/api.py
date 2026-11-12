@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .config import get_settings
@@ -14,6 +17,30 @@ from .queues.event_bus import EventBus
 from .services.schemas import DashboardStats, EventType
 
 app = FastAPI(title="Stock Tracker AI Orchestrator", version="0.1.0")
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_DEFAULT_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001")
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _env_list(name: str) -> set[str]:
+    return {item.strip().rstrip("/").lower() for item in os.getenv(name, "").split(",") if item.strip()}
+
+
+@app.middleware("http")
+async def _reject_cross_site(request: Request, call_next):
+    """This API has no auth and binds to loopback, so a web page in the operator's browser
+    is the main threat: block cross-site writes (e.g. approving agent actions) and
+    DNS-rebinding hosts."""
+    host = (urlsplit(f"//{request.headers.get('host', '')}").hostname or "").lower()
+    if host not in _LOCAL_HOSTS and host not in _env_list("ORCHESTRATOR_ALLOWED_HOSTS"):
+        return JSONResponse({"detail": "Host not allowed"}, status_code=403)
+    origin = (request.headers.get("origin") or "").rstrip("/").lower()
+    if request.method in _MUTATING_METHODS and origin:
+        allowed = _env_list("ORCHESTRATOR_CORS_ORIGINS") or set(_DEFAULT_ORIGINS)
+        if origin not in allowed:
+            return JSONResponse({"detail": "Cross-site request rejected"}, status_code=403)
+    return await call_next(request)
 
 
 @app.on_event("startup")
