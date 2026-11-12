@@ -267,7 +267,15 @@ def _apply_weight_overrides(
     bad = set(overrides) - known
     if bad:
         raise ValueError(f"Unknown factor keys: {bad}")
-    factors = [(k, float(overrides.get(k, w)), i) for k, w, i in preset["factors"]]
+    factors = []
+    for key, default_weight, inverted in preset["factors"]:
+        raw = overrides.get(key, default_weight)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+            raise ValueError(f"Weight for {key} must be a number")
+        weight = float(raw)
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"Weight for {key} must be a finite, non-negative number")
+        factors.append((key, weight, inverted))
     total = sum(w for _, w, _ in factors)
     if total <= 0:
         raise ValueError("Sum of weights must be positive")

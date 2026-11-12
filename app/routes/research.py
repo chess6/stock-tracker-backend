@@ -23,6 +23,7 @@ from ..services.sector_stats import sector_stats_for_tickers
 from ..services.feature_flags import is_enabled
 from ..services.insider_analysis import build_insider_conviction_alerts
 from ..services.narrative import build_narrative_divergence_alerts
+from ..validation import float_arg, int_arg
 
 research_bp = Blueprint("research", __name__, url_prefix="/api/research")
 
@@ -227,9 +228,8 @@ def research_ticker(ticker: str):
 @research_bp.route("/insiders/clusters", methods=["GET"])
 def research_insider_clusters():
     tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
-    limit = min(int(request.args.get("limit", 50)), 200)
-    min_buy_value_raw = request.args.get("min_buy_value")
-    min_buy_value = float(min_buy_value_raw) if min_buy_value_raw not in (None, "") else None
+    limit = int_arg("limit", 50, min_value=1, max_value=200)
+    min_buy_value = float_arg("min_buy_value", None, min_value=0.0)
     payload = get_research_service().get_insider_clusters(
         tickers or None,
         limit=limit,

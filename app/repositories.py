@@ -3069,7 +3069,7 @@ class Repository:
             "DELETE FROM watchlist_tickers WHERE watchlist_id = ?",
             (watchlist_id,),
         )
-        normalized = list({t.upper() for t in tickers if t.strip()})
+        normalized = list({t.strip().upper() for t in tickers if isinstance(t, str) and t.strip()})
         if normalized:
             self.conn.executemany(
                 "INSERT INTO watchlist_tickers (watchlist_id, ticker) VALUES (?, ?)",

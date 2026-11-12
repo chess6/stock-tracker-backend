@@ -10,6 +10,13 @@ from urllib.parse import urlparse
 import requests
 
 from ..repositories import Repository, utc_now_iso
+from .safe_fetch import (
+    HTML_CONTENT_TYPES,
+    ResponseTooLargeError,
+    UnexpectedContentTypeError,
+    UnsafeURLError,
+    safe_get,
+)
 
 logger = logging.getLogger("stock_tracker.pipeline.article_extraction")
 
@@ -112,28 +119,45 @@ class DomainFetcher:
             self._wait_for_domain(domain)
             self._last_fetch_by_domain[domain] = time.monotonic()
             try:
-                response = self.session.get(url, timeout=self.timeout)
-                response.raise_for_status()
-                self.repo.upsert_domain_fetch_state(domain, success=True)
-                return response.text
-            except requests.RequestException as exc:
-                failures = self.repo.upsert_domain_fetch_state(domain, success=False)
-                backoff_seconds = min(
-                    self.max_delay_seconds,
-                    self.min_delay_seconds * (2 ** min(failures, self.max_failures)),
-                )
-                jitter = random.uniform(0, backoff_seconds * 0.25)
-                logger.debug(
-                    "fetch failed domain=%s attempt=%d backoff=%.1fs url=%s err=%s",
-                    domain,
-                    attempt + 1,
-                    backoff_seconds + jitter,
+                response = safe_get(
+                    self.session,
                     url,
-                    exc,
+                    timeout=self.timeout,
+                    allowed_content_types=HTML_CONTENT_TYPES,
                 )
-                if attempt + 1 >= max_retries:
+            except (UnsafeURLError, UnexpectedContentTypeError, ResponseTooLargeError) as exc:
+                # A property of this URL, not of the domain's health: no retry, no backoff.
+                logger.debug("skip url=%s: %s", url, exc)
+                return None
+            except requests.RequestException as exc:
+                error: object = exc
+            else:
+                if response.ok:
+                    self.repo.upsert_domain_fetch_state(domain, success=True)
+                    return response.text
+                if 400 <= response.status_code < 500 and response.status_code != 429:
+                    # A missing or forbidden article says nothing about the domain; don't back it off.
+                    logger.debug("skip url=%s: HTTP %s", url, response.status_code)
                     return None
-                time.sleep(backoff_seconds + jitter)
+                error = f"HTTP {response.status_code}"
+
+            failures = self.repo.upsert_domain_fetch_state(domain, success=False)
+            backoff_seconds = min(
+                self.max_delay_seconds,
+                self.min_delay_seconds * (2 ** min(failures, self.max_failures)),
+            )
+            jitter = random.uniform(0, backoff_seconds * 0.25)
+            logger.debug(
+                "fetch failed domain=%s attempt=%d backoff=%.1fs url=%s err=%s",
+                domain,
+                attempt + 1,
+                backoff_seconds + jitter,
+                url,
+                error,
+            )
+            if attempt + 1 >= max_retries:
+                return None
+            time.sleep(backoff_seconds + jitter)
         return None
 
     def fetch_and_extract(self, url: str) -> tuple[str | None, str | None]:

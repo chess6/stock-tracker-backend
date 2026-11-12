@@ -20,6 +20,7 @@ from .article_dedup import compute_simhash
 from .article_enrichment import infer_topic_cluster, simple_sentiment
 from .entity_linker_factory import create_entity_linker
 from .entity_linking import build_entity_link_text
+from .safe_fetch import HTML_CONTENT_TYPES, is_http_url, safe_get
 
 try:
     import feedparser  # type: ignore
@@ -309,9 +310,18 @@ class _HTMLStripper(HTMLParser):
 
 
 def strip_html(html: str) -> str:
-    parser = _HTMLStripper()
-    parser.feed(html)
-    return parser.get_text()
+    """Plain text from HTML. Repeats while tags remain, because HTMLParser decodes
+    entities: "&lt;img onerror=...&gt;" would otherwise come back as live markup."""
+    text = html or ""
+    for _ in range(3):
+        parser = _HTMLStripper()
+        parser.feed(text)
+        parser.close()
+        stripped = parser.get_text()
+        if stripped == text or not re.search(r"<[a-zA-Z!/?]", stripped):
+            return stripped
+        text = stripped
+    return re.sub(r"<[^>]*>", " ", text).strip()
 
 
 def url_hash(url: str) -> str:
@@ -326,7 +336,7 @@ def text_hash(text: str) -> str:
 def parse_feed(xml_text: str) -> list[dict]:
     if feedparser is not None:
         parsed = feedparser.parse(xml_text)
-        return [
+        items = [
             {
                 "title": entry.get("title"),
                 "link": entry.get("link"),
@@ -334,8 +344,8 @@ def parse_feed(xml_text: str) -> list[dict]:
                 "published": entry.get("published") or entry.get("updated"),
             }
             for entry in parsed.entries
-            if entry.get("link") and entry.get("title")
         ]
+        return _clean_feed_items(items)
 
     root = ElementTree.fromstring(xml_text)
     items = []
@@ -344,9 +354,21 @@ def parse_feed(xml_text: str) -> list[dict]:
         link = item.findtext("link")
         summary = item.findtext("description")
         published = item.findtext("pubDate")
-        if title and link:
-            items.append({"title": title, "link": link, "summary": summary, "published": published})
-    return items
+        items.append({"title": title, "link": link, "summary": summary, "published": published})
+    return _clean_feed_items(items)
+
+
+def _clean_feed_items(items: list[dict]) -> list[dict]:
+    """Drop items without a title or an http(s) link (javascript:, data:, ... are rejected)
+    and strip markup from titles, which are served verbatim by the news API."""
+    cleaned = []
+    for item in items:
+        link = (item.get("link") or "").strip()
+        title = strip_html(item.get("title") or "")
+        if not title or not is_http_url(link):
+            continue
+        cleaned.append({**item, "title": title, "link": link})
+    return cleaned
 
 
 def extract_article_text(html_text: str) -> str:
@@ -382,7 +404,14 @@ class NewsService:
             expires_at = datetime.fromisoformat(cached["expires_at"].replace("Z", "+00:00"))
             if expires_at > datetime.now(timezone.utc):
                 return cached["response_body"] or ""
-        response = self.session.get(url, timeout=self.timeout)
+        # Feed and article URLs are untrusted: block internal addresses, cap size/time,
+        # and only accept HTML for article pages (their text is served by /api/news).
+        response = safe_get(
+            self.session,
+            url,
+            timeout=self.timeout,
+            allowed_content_types=HTML_CONTENT_TYPES if cache_namespace == "article" else None,
+        )
         response.raise_for_status()
         body = response.text
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=self.cache_ttl_seconds)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -563,7 +592,7 @@ class NewsService:
 
         def _fetch_one(feed_url: str) -> tuple[str, str | None]:
             try:
-                response = self.session.get(feed_url, timeout=per_feed_timeout)
+                response = safe_get(self.session, feed_url, timeout=per_feed_timeout)
                 response.raise_for_status()
                 return feed_url, response.text
             except Exception as exc:

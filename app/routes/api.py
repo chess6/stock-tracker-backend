@@ -10,6 +10,8 @@ from flask import Blueprint, current_app, jsonify, request
 from ..clients.sec import SecClient
 from ..db import get_db
 from ..repositories import Repository
+from ..security import host_is_local_or_allowed
+from ..validation import float_arg, int_arg, json_object, normalize_ticker, normalize_ticker_list
 from ..services.fundamentals import FundamentalsService
 from ..services.insiders import InsidersService
 from ..services.edgar_ingestion import EdgarIngestionService
@@ -164,8 +166,8 @@ def ticker_intraday(ticker: str):
 
 @api_bp.route("/news", methods=["GET"])
 def news_feed():
-    limit = min(max(int(request.args.get("limit", 50)), 1), 200)
-    offset = max(int(request.args.get("offset", 0)), 0)
+    limit = int_arg("limit", 50, min_value=1, max_value=200)
+    offset = int_arg("offset", 0, min_value=0, max_value=1_000_000)
     q = request.args.get("q", "").strip() or None
     category = request.args.get("category", "").strip() or None
     source_domain = request.args.get("sourceDomain", "").strip() or None
@@ -189,7 +191,7 @@ def news_feed():
 
 @api_bp.route("/news/source-domains", methods=["GET"])
 def news_source_domains():
-    limit = min(max(int(request.args.get("limit", 100)), 1), 500)
+    limit = int_arg("limit", 100, min_value=1, max_value=500)
     domains = get_repo().list_news_source_domains(limit=limit)
     return jsonify({"domains": domains})
 
@@ -199,9 +201,9 @@ def news_clusters():
     from ..services.article_cluster import build_cluster_response
 
     event_type = request.args.get("eventType", "").strip() or request.args.get("event_type", "").strip() or None
-    hours = request.args.get("hours", 72, type=int)
-    limit = min(max(request.args.get("limit", 50, type=int), 1), 200)
-    offset = max(request.args.get("offset", 0, type=int), 0)
+    hours = int_arg("hours", 72, min_value=1, max_value=24 * 365)
+    limit = int_arg("limit", 50, min_value=1, max_value=200)
+    offset = int_arg("offset", 0, min_value=0, max_value=1_000_000)
     payload = build_cluster_response(
         get_repo(),
         event_type=event_type,
@@ -268,8 +270,8 @@ def tickers_movers():
     window = request.args.get("window", "d").lower()
     if window not in {"d", "w", "m"}:
         window = "d"
-    threshold = request.args.get("threshold", default=10.0, type=float)
-    limit = request.args.get("limit", default=50, type=int)
+    threshold = float_arg("threshold", 10.0, min_value=0.0, max_value=1000.0)
+    limit = int_arg("limit", 50, min_value=1, max_value=500)
     app = current_app._get_current_object()
 
     def load_movers() -> list[dict]:
@@ -292,7 +294,7 @@ def companies_peers():
     if not industry:
         return jsonify({"error": "industry query param required"}), 400
     sector = request.args.get("sector", "").strip() or None
-    limit = request.args.get("limit", default=100, type=int)
+    limit = int_arg("limit", 100, min_value=1, max_value=500)
     peers = get_repo().fetch_industry_peers(industry, sector=sector, limit=limit)
     return jsonify({"peers": peers, "industry": industry, "sector": sector})
 
@@ -367,7 +369,7 @@ def get_preferences():
 
 @api_bp.route("/preferences", methods=["PUT"])
 def update_preferences():
-    body = request.get_json(silent=True) or {}
+    body = json_object()
     theme = body.get("theme")
     portfolio = body.get("portfolio")
     research_color_mode = body.get("researchColorMode")
@@ -417,7 +419,7 @@ def update_preferences():
         )
     except Exception as exc:
         current_app.logger.exception("Failed to update preferences")
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "Failed to update preferences"}), 500
     return jsonify(payload)
 
 
@@ -483,11 +485,16 @@ def get_watchlist(name: str):
 
 @api_bp.route("/watchlists/<name>", methods=["PUT"])
 def upsert_watchlist(name: str):
-    body = request.get_json(silent=True) or {}
+    body = json_object()
+    description = body.get("description")
+    if description is not None and not isinstance(description, str):
+        return jsonify({"error": "description must be a string"}), 400
+    # Validate before writing so a bad payload can't leave a half-saved watchlist.
+    tickers = normalize_ticker_list(body["tickers"]) if "tickers" in body else None
     repo = get_repo()
-    wl_id = repo.upsert_watchlist(name, description=body.get("description"))
-    if "tickers" in body:
-        repo.set_watchlist_tickers(wl_id, body["tickers"])
+    wl_id = repo.upsert_watchlist(name, description=description)
+    if tickers is not None:
+        repo.set_watchlist_tickers(wl_id, tickers)
     wl = repo.get_watchlist(name)
     return jsonify(wl)
 
@@ -505,10 +512,10 @@ def delete_watchlist(name: str):
 
 @api_bp.route("/watchlists/<name>/tickers", methods=["POST"])
 def add_watchlist_ticker(name: str):
-    body = request.get_json(silent=True) or {}
-    ticker = (body.get("ticker") or "").strip().upper()
-    if not ticker:
+    body = json_object()
+    if not body.get("ticker"):
         return jsonify({"error": "ticker is required"}), 400
+    ticker = normalize_ticker(body["ticker"])
     repo = get_repo()
     wl = repo.get_watchlist(name)
     if not wl:
@@ -573,6 +580,10 @@ def remove_watchlist_ticker(name: str, ticker: str):
 @api_bp.before_request
 def _admin_auth_guard():
     if request.path.startswith("/api/admin/"):
+        # Loopback-only mode trusts the peer address, so also require a local Host header:
+        # a DNS-rebinding page reaches 127.0.0.1 under its own hostname.
+        if not current_app.config.get("ADMIN_API_KEY") and not host_is_local_or_allowed():
+            return jsonify({"error": "Admin routes require a localhost Host header unless ADMIN_API_KEY is set"}), 403
         result = _check_admin_key()
         if result is not None:
             return result
@@ -669,7 +680,7 @@ def enqueue_universe_insiders():
 
 @api_bp.route("/admin/job-runs", methods=["GET"])
 def admin_job_runs():
-    limit = min(max(int(request.args.get("limit", 25)), 1), 100)
+    limit = int_arg("limit", 25, min_value=1, max_value=100)
     return jsonify({"runs": get_repo().list_job_runs(limit=limit)})
 
 
@@ -1029,7 +1040,7 @@ def enrich_articles_admin():
 
 @api_bp.route("/news/analytics/event-reactions", methods=["GET"])
 def news_event_reaction_analytics():
-    limit = min(max(int(request.args.get("limit", 20)), 1), 100)
+    limit = int_arg("limit", 20, min_value=1, max_value=100)
     return jsonify({"events": get_repo().event_reaction_analytics(limit=limit)})
 
 
