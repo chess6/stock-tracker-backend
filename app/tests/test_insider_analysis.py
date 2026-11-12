@@ -165,9 +165,15 @@ def test_build_insider_conviction_alerts_filters_by_intensity(app):
         assert "CLUS" in tickers
 
 
-def test_build_insider_conviction_alerts_dedupes_by_ticker(app):
+def test_build_insider_conviction_alerts_dedupes_by_ticker(app, monkeypatch):
+    from datetime import date
+
     from app.db import get_db
     from app.repositories import Repository
+    from app.services import insider_analysis
+
+    # Alerts only cover clusters from the last 30 days; pin "today" to the fixture dates.
+    monkeypatch.setattr(insider_analysis, "_today", lambda: date(2026, 6, 25))
 
     with app.app_context():
         repo = Repository(get_db())

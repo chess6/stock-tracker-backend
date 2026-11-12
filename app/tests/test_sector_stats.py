@@ -3,6 +3,7 @@
 from app.db import get_db
 from app.repositories import Repository
 from app.services.sector_stats import percentile_breakpoints, sector_stats_for_tickers
+from app.tests.fundamentals_factory import annual_statement_rows
 
 
 def _seed_sector_peers(repo: Repository) -> None:
@@ -12,6 +13,8 @@ def _seed_sector_peers(repo: Repository) -> None:
     ])
     for ticker, gp, revenue in [("AAA", 400.0, 1000.0), ("BBB", 600.0, 2000.0)]:
         company = repo.get_company_by_ticker(ticker)
+        # Complete 10-K so the canonical-annual filter keeps the period.
+        repo.upsert_fundamentals(annual_statement_rows(company["id"], skip={"gp", "assets", "equity", "liabilities"}))
         for metric, value in [("revenue", revenue), ("gp", gp), ("assets", 2000.0), ("equity", 800.0),
                               ("liabilities", 1200.0), ("sharesbas", 100.0), ("netinc", 80.0)]:
             repo.upsert_fundamentals([

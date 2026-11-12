@@ -7,6 +7,7 @@ from app.services.pillar_engine import evaluate_pillars
 from app.services.thesis_engine import build_thesis, evaluate_thesis_for_ticker, thesis_to_api
 from app.tests.test_gate_engine import _base_inputs
 from app.tests.test_pillar_engine import _pillar_candidate
+from app.tests.fundamentals_factory import annual_statement_rows
 
 
 def _thesis_inputs(**gate_overrides):
@@ -209,6 +210,8 @@ def test_research_thesis_route_shape(app, client):
         repo = Repository(get_db())
         repo.upsert_companies([{"ticker": "THES1", "name": "Thesis Test", "cik": "0000000100"}])
         company = repo.get_company_by_ticker("THES1")
+        # Complete 10-K so the canonical-annual filter keeps the period.
+        repo.upsert_fundamentals(annual_statement_rows(company["id"]))
         repo.upsert_fundamentals(
             [
                 {

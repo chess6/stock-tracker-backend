@@ -16,6 +16,7 @@ from app.services.metric_primitives import (
     SLOAN_ACCRUALS_HIGH_THRESHOLD,
 )
 from app.services.verification_spec import GOLDEN_CURRENT_ROW, GOLDEN_PRIOR_ROW
+from app.tests.fundamentals_factory import annual_statement_rows
 
 
 def _base_inputs(**overrides):
@@ -355,6 +356,8 @@ def test_research_gates_route_shape(app, client):
         repo = Repository(get_db())
         repo.upsert_companies([{"ticker": "GATE1", "name": "Gate Test Co", "cik": "0000000001"}])
         company = repo.get_company_by_ticker("GATE1")
+        # Complete 10-K so the canonical-annual filter keeps the period.
+        repo.upsert_fundamentals(annual_statement_rows(company["id"]))
         repo.upsert_fundamentals(
             [
                 {

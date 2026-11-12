@@ -26,6 +26,21 @@ def _etld_plus_one(domain: str | None) -> str | None:
     return ".".join(parts[-2:])
 
 
+def _parse_published_at(published_at: str | None) -> datetime:
+    """Article publish time as aware UTC; falls back to now for missing/unparseable values."""
+    if published_at:
+        try:
+            parsed = datetime.fromisoformat(published_at.strip().replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+
+def _iso_z(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def _mean_vector(left: list[float], right: list[float], *, left_weight: int, right_weight: int) -> list[float]:
     total = left_weight + right_weight
     if total <= 0:
@@ -50,9 +65,10 @@ def assign_article_to_event_cluster(
     if not event_type or not vector:
         return None
 
-    now = (published_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat()).replace("+00:00", "Z")
+    published = _parse_published_at(published_at)
+    now = _iso_z(published)
     domain_key = _etld_plus_one(source_domain)
-    candidates = repo.find_recent_event_clusters(event_type, hours=CLUSTER_WINDOW_HOURS)
+    candidates = repo.find_recent_event_clusters(event_type, hours=CLUSTER_WINDOW_HOURS, as_of=published)
     best_cluster_id = None
     best_similarity = None
     for candidate in candidates:
@@ -111,7 +127,8 @@ def assign_article_to_event_cluster(
         best_cluster_id,
         {
             "headline": headline or candidate.get("headline"),
-            "last_seen_at": now,
+            # An older (backfilled) article must not move the cluster's activity backwards.
+            "last_seen_at": max(now, candidate.get("last_seen_at") or now),
             "article_count": article_count,
             "source_count": len(domains),
             "source_domains": domains,
