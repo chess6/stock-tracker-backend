@@ -7,6 +7,7 @@ from app.repositories import Repository
 from app.services.fundamentals import FundamentalsService
 from app.services.screening import run_composable_screen
 from app.services.prices import PricesService
+from app.tests.fundamentals_factory import annual_statement_rows
 
 
 def _seed_aapl_fundamentals(repo: Repository) -> dict:
@@ -156,6 +157,8 @@ def test_screen_insider_buy6m_filter(app, client):
         repo = Repository(get_db())
         repo.upsert_companies([{"ticker": "BUY1", "name": "Buyer Co", "cik": "0000000001"}])
         company = repo.get_company_by_ticker("BUY1")
+        # Complete 10-K so the canonical-annual filter keeps the period.
+        repo.upsert_fundamentals(annual_statement_rows(company["id"]))
         repo.upsert_fundamentals(
             [
                 {
@@ -212,6 +215,8 @@ def test_screen_insider_buy6m_filter(app, client):
 def _seed_minimal_ticker(repo: Repository, ticker: str, *, buy6m: float = 0, cluster_count: int = 0) -> dict:
     repo.upsert_companies([{"ticker": ticker, "name": f"{ticker} Co", "cik": f"000000{ticker[-4:]}"}])
     company = repo.get_company_by_ticker(ticker)
+    # Complete 10-K so the canonical-annual filter keeps the period.
+    repo.upsert_fundamentals(annual_statement_rows(company["id"]))
     repo.upsert_fundamentals(
         [
             {

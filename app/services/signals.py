@@ -481,7 +481,7 @@ def _merge_signals(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _build_context(repo: Repository, tickers: set[str]) -> dict[str, Any]:
     portfolio = repo.fetch_portfolio_tickers()
     watchlist = repo.get_boosted_tickers()
-    fundamentals = repo.fetch_tickers_with_fundamentals(list(tickers)) if tickers else set()
+    fundamentals = repo.fetch_tickers_with_scores(list(tickers)) if tickers else set()
     company_names: dict[str, str | None] = {}
     if tickers:
         placeholders = ",".join("?" for _ in tickers)

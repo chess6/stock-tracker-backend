@@ -70,3 +70,41 @@ def test_event_cluster_groups_similar_articles(app):
         ).fetchone()
         assert cluster["article_count"] == 2
         assert cluster["source_count"] == 2
+
+
+def test_event_cluster_window_is_anchored_on_publish_time(app):
+    """Articles months apart must not merge, even when processed back-to-back today."""
+    with app.app_context():
+        repo = Repository(get_db())
+        ids = []
+        for idx, published in enumerate(["2026-01-05T09:00:00Z", "2026-06-16T09:00:00Z"]):
+            ids.append(
+                repo.upsert_article(
+                    {
+                        "canonical_url": f"https://example.com/window-{idx}",
+                        "url_hash": f"hash-window-{idx}",
+                        "title": "Fed holds rates steady",
+                        "summary": "Federal Reserve keeps benchmark rate unchanged",
+                        "published_at": published,
+                        "fetched_at": published,
+                        "source_domain": "reuters.com",
+                        "raw_source": "test",
+                    },
+                    skip_dedup=True,
+                )
+            )
+        clusters = [
+            assign_article_to_event_cluster(
+                repo,
+                article_id=article_id,
+                event_type="macroeconomic",
+                headline="Fed holds rates steady",
+                published_at=published,
+                source_domain="reuters.com",
+                sentiment_score=0.0,
+                vector=[1.0, 0.0, 0.0],
+            )
+            for article_id, published in zip(ids, ["2026-01-05T09:00:00Z", "2026-06-16T09:00:00Z"])
+        ]
+        assert clusters[0] is not None and clusters[1] is not None
+        assert clusters[0] != clusters[1]

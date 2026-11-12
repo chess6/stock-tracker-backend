@@ -7,6 +7,7 @@ import pytest
 from app.services.gate_engine import evaluate_gates_for_ticker
 from app.services.thesis_engine import evaluate_thesis_for_ticker
 from app.services.verification_spec import THESIS_GATE_SPECS, thesis_expectations_met
+from app.tests.fundamentals_factory import annual_statement_rows
 
 
 @pytest.mark.parametrize("spec", THESIS_GATE_SPECS, ids=lambda item: item["ticker"])
@@ -47,6 +48,8 @@ def test_pillars_with_debt_maturity_buckets_no_500(app, client):
         repo = Repository(get_db())
         repo.upsert_companies([{"ticker": "DEBT1", "name": "Debt Maturity Co", "cik": "0000000200"}])
         company = repo.get_company_by_ticker("DEBT1")
+        # Complete 10-K so the canonical-annual filter keeps the period.
+        repo.upsert_fundamentals(annual_statement_rows(company["id"]))
         repo.upsert_fundamentals(
             [
                 {

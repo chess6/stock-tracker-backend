@@ -1692,7 +1692,8 @@ class Repository:
             output.append(cluster)
         return output
 
-    def fetch_tickers_with_fundamentals(self, tickers: list[str]) -> set[str]:
+    def fetch_tickers_with_scores(self, tickers: list[str]) -> set[str]:
+        """Subset of ``tickers`` that have a row in company_scores."""
         if not tickers:
             return set()
         placeholders = ",".join("?" for _ in tickers)
@@ -3760,20 +3761,32 @@ class Repository:
         *,
         hours: int = 72,
         limit: int = 100,
+        as_of: datetime | None = None,
     ) -> list[dict]:
-        from datetime import datetime, timedelta, timezone
+        """Clusters of ``event_type`` active within ``hours`` of ``as_of`` (default: now).
 
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        Anchoring on the article's publish time (not wall-clock now) lets backfilled
+        or re-enriched articles join the clusters that existed when they were published.
+        """
+        anchor = as_of or datetime.now(timezone.utc)
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=timezone.utc)
+
+        def _iso(value: datetime) -> str:
+            return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+        window = timedelta(hours=hours)
         rows = self.conn.execute(
             """
             SELECT *
             FROM article_event_clusters
             WHERE event_type = ?
               AND last_seen_at >= ?
+              AND first_seen_at <= ?
             ORDER BY last_seen_at DESC
             LIMIT ?
             """,
-            (event_type, cutoff, limit),
+            (event_type, _iso(anchor - window), _iso(anchor + window), limit),
         ).fetchall()
         return [dict(row) for row in rows]
 

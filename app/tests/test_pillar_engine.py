@@ -10,6 +10,7 @@ from app.services.pillar_engine import (
     pillars_to_api,
 )
 from app.tests.test_gate_engine import _base_inputs
+from app.tests.fundamentals_factory import annual_statement_rows
 
 
 def _pillar_candidate(**overrides):
@@ -159,6 +160,8 @@ def test_research_pillars_route_shape(app, client):
         repo = Repository(get_db())
         repo.upsert_companies([{"ticker": "PILR1", "name": "Pillar Test", "cik": "0000000099"}])
         company = repo.get_company_by_ticker("PILR1")
+        # Complete 10-K so the canonical-annual filter keeps the period.
+        repo.upsert_fundamentals(annual_statement_rows(company["id"]))
         repo.upsert_fundamentals(
             [
                 {

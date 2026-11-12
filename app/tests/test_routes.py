@@ -169,13 +169,20 @@ def test_news_feed_orders_by_published_at_desc(app, client):
         )
         repo.update_article_ranking(new_id, rank_score=1.0)
 
-    response = client.get("/api/news?limit=10")
+    response = client.get("/api/news?limit=10&sort=latest")
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["total"] == 2
     assert [article["title"] for article in payload["articles"]] == [
         "Fresh cloud infrastructure earnings recap",
         "Older semiconductor supply chain report",
+    ]
+
+    # The default sort is importance (ranked feed), so the high-rank older article leads.
+    default_payload = client.get("/api/news?limit=10").get_json()
+    assert [article["title"] for article in default_payload["articles"]] == [
+        "Older semiconductor supply chain report",
+        "Fresh cloud infrastructure earnings recap",
     ]
 
 
