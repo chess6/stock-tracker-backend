@@ -9,6 +9,7 @@ from .middleware import register_request_logging
 from .routes.api import api_bp
 from .routes.research import research_bp
 from .routes.signals import signals_bp
+from .auth import init_auth
 from .security import init_security
 from .validation import register_error_handlers
 
@@ -19,6 +20,7 @@ def create_app(config: Config | None = None) -> Flask:
     app = Flask(__name__)
     app.config.from_mapping((config or Config()).to_flask_config())
     init_security(app)
+    init_auth(app)
     register_error_handlers(app)
 
     register_request_logging(app)
