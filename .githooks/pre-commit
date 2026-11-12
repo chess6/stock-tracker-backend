@@ -1,0 +1,19 @@
+#!/bin/sh
+# Blocks commits that contain secrets (API keys, tokens, private keys).
+# Enable once per clone:   git config core.hooksPath .githooks
+# Requires gitleaks:        brew install gitleaks
+# Rules live in .gitleaks.toml; CI (.github/workflows/secret-scan.yml) runs the same scan on every push and PR.
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is not installed, so staged changes were NOT scanned for secrets." >&2
+  echo "pre-commit: install it with 'brew install gitleaks'." >&2
+  exit 0
+fi
+
+root="$(git rev-parse --show-toplevel)"
+if ! gitleaks git --pre-commit --staged --redact --no-banner --config "$root/.gitleaks.toml" "$root"; then
+  echo "" >&2
+  echo "pre-commit: commit blocked because the staged changes look like they contain a secret." >&2
+  echo "pre-commit: move it to .env (git-ignored) and read it from the environment instead." >&2
+  exit 1
+fi

@@ -1,0 +1,50 @@
+# Secret scanning config for gitleaks (https://github.com/gitleaks/gitleaks).
+# Used by the pre-commit hook (.pre-commit-config.yaml) and CI (.github/workflows/secret-scan.yml).
+# Run locally:  gitleaks git --redact .        (full history)
+#               gitleaks dir --redact .        (working tree, including untracked files)
+
+title = "stock-tracker-backend"
+
+[extend]
+useDefault = true
+
+# Nasdaq Data Link (Sharadar) keys: 20-character tokens passed as ?api_key= or set via NASDAQ_API_KEY.
+[[rules]]
+id = "nasdaq-data-link-api-key"
+description = "Nasdaq Data Link API key"
+regex = '''(?i)(?:[?&]api_key=|nasdaq[a-z_]*key["']?\s*[:=]\s*["']?)([a-z0-9_\-]{20})(?:[^a-z0-9_\-]|$)'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["api_key", "nasdaq"]
+
+[[rules.allowlists]]
+description = "Placeholders in docs and .env.example"
+stopwords = ["your", "example", "placeholder", "changeme", "xxxx", "redacted"]
+
+# Tiingo tokens: sent as ?token=, "Authorization: Token ...", or set via TIINGO_API_KEY.
+[[rules]]
+id = "tiingo-api-token"
+description = "Tiingo API token"
+regex = '''(?i)(?:[?&]token=|authorization["']?\s*[:=]\s*["']?token\s+|tiingo[a-z_]*(?:key|token)["']?\s*[:=]\s*["']?)([a-z0-9]{32,64})(?:[^a-z0-9]|$)'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["token", "tiingo"]
+
+[[rules.allowlists]]
+description = "Placeholders in docs and .env.example"
+stopwords = ["your", "example", "placeholder", "changeme", "xxxx", "redacted"]
+
+# Metric registry entries use an "api_key" field for metric identifiers such as
+# "peerIndustryRevenueCagr3yr". Allow only that shape, only in the registry module.
+[[allowlists]]
+description = "Metric identifiers in the metric registry"
+condition = "AND"
+paths = ['''(^|/)app/services/metric_registry\.py$''']
+regexTarget = "line"
+regexes = ['''"api_key"\s*:\s*"[a-z][a-zA-Z0-9]*"''']
+
+# Hugging Face model ids passed as tokenizer="org/model" look like generic keys.
+[[allowlists]]
+description = "Hugging Face model identifiers"
+regexTarget = "line"
+regexes = ['''(?:model|tokenizer)\s*=\s*"ProsusAI/finbert"''']

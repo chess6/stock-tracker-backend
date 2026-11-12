@@ -64,4 +64,8 @@ def test_key_required_even_from_loopback(keyed_app):
 
 def test_key_accepted_from_remote(keyed_app):
     assert _get(keyed_app, remote_addr="203.0.113.7", headers={"X-Api-Key": "s3cret"}).status_code == 200
-    assert _get(keyed_app, remote_addr="203.0.113.7", query="?apiKey=s3cret").status_code == 200
+
+
+def test_key_in_query_string_rejected(keyed_app):
+    # Keys in URLs leak into access logs, so only the X-Api-Key header is accepted.
+    assert _get(keyed_app, remote_addr="203.0.113.7", query="?apiKey=s3cret").status_code == 401

@@ -60,14 +60,11 @@ def _check_admin_key():
         if _is_local_request():
             return None
         return jsonify({"error": "Admin routes are localhost-only unless ADMIN_API_KEY is set"}), 403
-    provided = (
-        request.headers.get("X-Api-Key")
-        or request.args.get("apiKey")
-        or ""
-    )
+    # Header only: query strings end up in access logs, proxy logs and browser history.
+    provided = request.headers.get("X-Api-Key") or ""
     if hmac.compare_digest(provided.encode(), expected.encode()):
         return None
-    return jsonify({"error": "Unauthorized — set X-Api-Key header or apiKey query param"}), 401
+    return jsonify({"error": "Unauthorized — send the admin key in the X-Api-Key header"}), 401
 
 
 def get_repo() -> Repository:
