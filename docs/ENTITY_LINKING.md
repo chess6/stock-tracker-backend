@@ -70,7 +70,7 @@ Entity matches are saved with `save_entity_matches(..., merge=True)`, which:
 
 | Setting | Default | Why |
 |---------|---------|-----|
-| `enable_embeddings` | `false` | Avoids O(10k) company scan + embedding compute |
+| `enable_embeddings` | `false` | Avoids company-profile embedding compute (index build) |
 | `enable_finbert` | `false` | Not used for linking |
 | `retag_all` | `true` | Re-tag every complete article, not just missing enrichment rows |
 
@@ -153,7 +153,7 @@ If finance context is present and a normalized sector/industry label appears in 
 When `enable_embeddings=True` and an article vector exists:
 
 - Compare against pre-built company profile vectors (name + ticker + sector + industry)
-- Scan portfolio-boosted tickers first, then up to 200 company profiles
+- Search **all** company profiles with one matrix-vector product over a row-normalized float32 index (built once per linker); top 3 above threshold
 - Similarity ≥0.52 → strategy `embedding`, confidence capped at 0.82
 - Skipped for companies already matched at ≥0.80 confidence
 

@@ -151,4 +151,6 @@ def make_embed_fn(
     def _fn(text: str) -> list[float] | None:
         return embed_text(text, model_name=model_name, device=device)
 
+    # Stable identity for caches keyed on the model (a new closure is made per article).
+    _fn.cache_key = f"{model_name}::{device}"  # type: ignore[attr-defined]
     return _fn
