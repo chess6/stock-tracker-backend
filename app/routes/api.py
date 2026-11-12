@@ -5,7 +5,7 @@ import hmac
 import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 
 from ..clients.sec import SecClient
 from ..db import get_db
@@ -580,6 +580,8 @@ def remove_watchlist_ticker(name: str, ticker: str):
 @api_bp.before_request
 def _admin_auth_guard():
     if request.path.startswith("/api/admin/"):
+        if g.get("owner_authenticated"):
+            return None  # signed-in owner (protected mode); see app/auth.py
         # Loopback-only mode trusts the peer address, so also require a local Host header:
         # a DNS-rebinding page reaches 127.0.0.1 under its own hostname.
         if not current_app.config.get("ADMIN_API_KEY") and not host_is_local_or_allowed():
@@ -592,6 +594,19 @@ def _admin_auth_guard():
 @api_bp.route("/admin/status", methods=["GET"])
 def admin_status():
     return jsonify(get_repo().status_snapshot())
+
+
+@api_bp.route("/status/freshness", methods=["GET"])
+def public_freshness():
+    """Cache timestamps for the UI's "data as of" badges, without admin-only job/feed details."""
+    snapshot = get_repo().status_snapshot()
+    coverage = snapshot.get("coverage") or {}
+    return jsonify(
+        {
+            "freshness": snapshot.get("freshness") or {},
+            "coverage": {"companiesMissingMetadata": coverage.get("companiesMissingMetadata", 0)},
+        }
+    )
 
 
 @api_bp.route("/admin/pipeline-status", methods=["GET"])

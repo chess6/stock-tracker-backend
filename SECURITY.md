@@ -51,6 +51,17 @@ Rules, including Nasdaq Data Link and Tiingo key formats, live in `.gitleaks.tom
 * **Input validation:** numeric query parameters return `400` instead of `500` and are clamped to safe ranges. Ticker lists are type-checked and normalized before anything is written.
 * The Flask debugger is off unless `FLASK_DEBUG=1`.
 
+## Owner sign-in (public demos)
+
+Set `APP_PASSWORD_HASH` (generate it with `python -m app.auth hash-password`) to run a public, read-only demo:
+
+* Anyone can browse with GET requests.
+* `POST`, `PUT`, `PATCH` and `DELETE` need the owner session from `POST /api/auth/login`. Without it they return `401` with `{"authRequired": true}`.
+* The owner session also unlocks `/api/admin/*`. `ADMIN_API_KEY` and loopback access keep working for scripts.
+* Sessions are signed, HttpOnly, `SameSite=Lax` cookies that last 7 days. Set `SESSION_COOKIE_SECURE=1` behind HTTPS.
+* Login allows 5 failed attempts per address per 15 minutes.
+* `GET /api/status/freshness` exposes only data timestamps, for the UI badges.
+
 ## Safe defaults for public deployments
 
 If you deploy this API publicly:

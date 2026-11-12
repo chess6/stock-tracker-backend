@@ -139,6 +139,9 @@ Or set all in `.env` (see `.env.example` for `STOCK_TRACKER_FF_*` keys).
 | `NLP_DEVICE` | `auto` (default), `cpu`, or `cuda` for FinBERT/embeddings |
 | `ADMIN_API_KEY` | When set, admin routes require the `X-Api-Key` header. When unset, admin routes are loopback-only |
 | `NASDAQ_API_KEY` | Optional Nasdaq Data Link fallback when cache is empty |
+| `APP_PASSWORD_HASH` | Enables owner sign-in (`python -m app.auth hash-password`). Visitors get a read-only view; writes and admin need the owner session. Unset = single-user local mode |
+| `SECRET_KEY` | Session signing key (default: random key stored next to the database) |
+| `SESSION_COOKIE_SECURE` | `1` when served over HTTPS |
 | `CORS_ORIGINS` | Comma-separated browser origins allowed to call the API (default: localhost/127.0.0.1 on ports 3000 and 3001). Writes and admin calls from other origins get `403` |
 | `ALLOWED_HOSTS` | Extra `Host` names accepted by admin routes when `ADMIN_API_KEY` is unset (DNS-rebinding protection) |
 | `FLASK_DEBUG` | `1` enables the Flask debugger for `python api.py` (default off) |
