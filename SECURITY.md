@@ -29,6 +29,17 @@ This project is intended for **local development**:
 
 * Admin API routes are **loopback-only** when `ADMIN_API_KEY` is unset. Set `ADMIN_API_KEY` before exposing the API beyond localhost, and always behind a reverse proxy.
 * Never commit `.env`, API keys, or `data/*.sqlite3` files.
+* Send the admin key only in the `X-Api-Key` header. Keys in URLs end up in access and proxy logs, so query-string keys are rejected.
+
+## Secret scanning
+
+Secrets are checked at three points:
+
+1. **Before each commit:** `.githooks/pre-commit` runs [gitleaks](https://github.com/gitleaks/gitleaks) on staged changes. Enable it once per clone with `brew install gitleaks && git config core.hooksPath .githooks`.
+2. **On every push and pull request:** `.github/workflows/secret-scan.yml` scans the full git history and fails the check if anything is found.
+3. **GitHub push protection:** rejects pushes that contain secrets from known providers.
+
+Rules, including Nasdaq Data Link and Tiingo key formats, live in `.gitleaks.toml`. Run `gitleaks git --redact .` to scan locally. If a secret is ever committed, **rotate it first**; removing it from history does not make it safe again.
 * `SEC_USER_AGENT` must be a real contact email per [SEC fair access](https://www.sec.gov/os/webmaster-faq#code-support).
 
 ## Safe defaults for public deployments

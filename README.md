@@ -137,7 +137,7 @@ Or set all in `.env` (see `.env.example` for `STOCK_TRACKER_FF_*` keys).
 | `STOCK_TRACKER_REQUEST_TIMEOUT` | HTTP timeout for SEC/news (default: 20) |
 | `STOCK_TRACKER_LOG_DIR` | Log directory (default: `logs/`) |
 | `NLP_DEVICE` | `auto` (default), `cpu`, or `cuda` for FinBERT/embeddings |
-| `ADMIN_API_KEY` | When set, admin routes require `X-Api-Key` header (or `apiKey` query param). When unset, admin routes are loopback-only |
+| `ADMIN_API_KEY` | When set, admin routes require the `X-Api-Key` header. When unset, admin routes are loopback-only |
 | `NASDAQ_API_KEY` | Optional Nasdaq Data Link fallback when cache is empty |
 | `GUNICORN_BIND`, `GUNICORN_WORKERS`, `GUNICORN_THREADS`, `GUNICORN_TIMEOUT` | Production API tuning (`gunicorn.conf.py`) |
 
@@ -250,7 +250,7 @@ curl -X POST "http://localhost:5000/api/admin/bootstrap?tickers=JPM,MCD"
 Admin routes (`/api/admin/*`) are protected:
 
 - **`ADMIN_API_KEY` unset:** only loopback requests are allowed (`127.0.0.1` / `::1`, and every `X-Forwarded-For` / `X-Real-Ip` hop must also be loopback). Anything else gets `403`.
-- **`ADMIN_API_KEY` set:** every request needs `X-Api-Key: <key>` (or `?apiKey=`), including local ones. Anything else gets `401`.
+- **`ADMIN_API_KEY` set:** every request needs the `X-Api-Key: <key>` header, including local ones. Anything else gets `401`.
 
 Behind a reverse proxy that doesn't forward client addresses, set `ADMIN_API_KEY`. Without client addresses, all traffic looks local.
 

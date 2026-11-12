@@ -5,7 +5,6 @@
 .orchestrator_api.pid
 *.out
 backend.out
-.env
 data/
 !app/data/
 !app/data/sp500_constituents.json
@@ -13,3 +12,36 @@ logs/
 __pycache__/
 .pytest_cache/
 *.pyc
+
+# --- Secrets & local credentials (never commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa*
+id_ed25519*
+credentials.json
+service-account*.json
+secrets.*
+.secrets/
+.netrc
+.npmrc
+.pypirc
+
+# --- Local runtime state (may contain session keys / user data) ---
+instance/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- Python environments ---
+.venv/
+venv/
+env/

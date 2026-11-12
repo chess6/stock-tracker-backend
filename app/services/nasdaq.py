@@ -5,6 +5,14 @@ from datetime import datetime, timedelta
 import requests
 
 
+class NasdaqError(RuntimeError):
+    """Nasdaq Data Link request failure. The message never contains the request URL or API key."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class NasdaqService:
     def __init__(self, api_key: str | None, timeout: int = 20, session: requests.Session | None = None) -> None:
         self.api_key = api_key
@@ -20,8 +28,15 @@ class NasdaqService:
         if not self.api_key:
             raise RuntimeError("NASDAQ_API_KEY is not configured")
         full_params = {**params, "api_key": self.api_key}
-        response = self.session.get(f"{self.base_url}/{table}", params=full_params, timeout=self.timeout)
-        response.raise_for_status()
+        url = f"{self.base_url}/{table}"
+        # requests puts the full URL (including api_key) into its exception messages,
+        # so re-raise without it to keep the key out of logs and API error responses.
+        try:
+            response = self.session.get(url, params=full_params, timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise NasdaqError(f"Nasdaq request to {table} failed: {type(exc).__name__}") from None
+        if not response.ok:
+            raise NasdaqError(f"Nasdaq request to {table} failed with HTTP {response.status_code}", response.status_code)
         return response.json()
 
     def fetch_daily_change(self, tickers: list[str]) -> dict:
