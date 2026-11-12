@@ -252,3 +252,39 @@ def test_enrichment_merge_replaces_ingest_tags(app):
         tickers = {row["ticker"]: row["extraction_stage"] for row in rows}
         assert "TD" not in tickers
         assert tickers.get("NFLX") == "enrichment"
+
+
+def test_embedding_matching_searches_all_companies():
+    """The vector index covers every company, not just the first ~200 scanned before."""
+    import math
+
+    companies = [{"id": idx, "ticker": f"T{idx:03d}", "name": f"Filler Holdings {idx}"} for idx in range(1, 301)]
+    dims = 8
+
+    def unit(vec):
+        norm = math.sqrt(sum(x * x for x in vec))
+        return [x / norm for x in vec]
+
+    vectors = {company["id"]: unit([1.0] + [0.0] * (dims - 1)) for company in companies}
+    target_id = 250
+    vectors[target_id] = unit([0.0, 1.0] + [0.0] * (dims - 2))
+    linker = EntityLinker(companies=companies, alias_index={}, company_vectors=vectors)
+
+    article_vector = unit([0.05, 1.0] + [0.0] * (dims - 2))
+    matches = linker._match_embeddings("", "enrichment", article_vector, exclude_company_ids=set())
+
+    assert matches, "expected an embedding match"
+    assert matches[0].company_id == target_id
+    assert matches[0].match_strategy == "embedding"
+    assert matches[0].embedding_similarity > 0.99
+    # Excluded companies (already matched by stronger strategies) are skipped.
+    assert target_id not in {
+        m.company_id
+        for m in linker._match_embeddings("", "enrichment", article_vector, exclude_company_ids={target_id})
+    }
+
+
+def test_embedding_matching_ignores_mismatched_dimensions():
+    companies = [{"id": 1, "ticker": "AAA", "name": "Alpha Corp"}]
+    linker = EntityLinker(companies=companies, alias_index={}, company_vectors={1: [1.0, 0.0, 0.0]})
+    assert linker._match_embeddings("", "enrichment", [1.0, 0.0], exclude_company_ids=set()) == []

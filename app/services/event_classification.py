@@ -72,12 +72,15 @@ _EVENT_RULES: dict[str, list[tuple[str, float]]] = {
         (r"\bcloud\s+capacity\b", 0.65),
     ],
     "semiconductor_supply_chain": [
-        (r"\b(semiconductor|chip|foundry|wafer|tsmc|asml)\b", 0.7),
+        # "blue-chip stocks" is not semiconductor news.
+        (r"\b(semiconductors?|foundry|wafers?|tsmc|asml)\b|(?<!blue-)(?<!blue )\bchips?\b", 0.7),
         (r"\bsupply\s+chain\b.*\b(chip|semiconductor)\b", 0.8),
         (r"\bchip\s+shortage\b", 0.85),
     ],
     "regulation_legal_risk": [
-        (r"\b(sec|doj|ftc|antitrust|lawsuit|investigation|subpoena|fine|penalty)\b", 0.75),
+        # Uppercase-only SEC/DOJ/FTC; "fine" only as a penalty ("doing fine" is not legal risk).
+        (r"(?-i:\b(?:SEC|DOJ|FTC)\b)|\b(antitrust|lawsuits?|investigation|probe|subpoena|fined|penalt(?:y|ies))\b", 0.75),
+        (r"\b(?:million|billion|record|regulatory|eu|antitrust)\s+fine\b", 0.8),
         (r"\bregulat(ory|ion|or)\b", 0.55),
         (r"\bclass\s+action\b", 0.8),
     ],
@@ -101,7 +104,8 @@ _EVENT_RULES: dict[str, list[tuple[str, float]]] = {
         (r"\bconvertible\s+notes?\b", 0.7),
     ],
     "macroeconomic": [
-        (r"\b(fed|federal reserve|cpi|inflation|jobs\s+report|gdp|interest\s+rate|treasury\s+yield)\b", 0.8),
+        # Capitalized "Fed" only, so "grass-fed" or "fed into" don't count.
+        (r"(?-i:(?<![-\w])Fed\b)|\b(federal reserve|fomc|cpi|inflation|jobs\s+report|gdp|interest\s+rates?|treasury\s+yields?|rate\s+(?:cut|hike)s?)\b", 0.8),
         (r"\brecession\b", 0.75),
         (r"\btariff(s)?\b", 0.7),
     ],
@@ -152,6 +156,22 @@ _COMPILED_NARRATIVE_RULES = {
     for state, patterns in _NARRATIVE_STATE_RULES.items()
 }
 
+# A rule match is ignored when negated just before it: "did not beat", "no layoffs", "fails to raise".
+_NEGATION_BEFORE_RE = re.compile(
+    r"(?:\b(?:not|no|never|without)|n't|\bfail(?:s|ed|ing)?\s+to)\s+(?:[\w-]+\s+){0,2}$",
+    re.I,
+)
+_NEGATION_WINDOW_CHARS = 40
+
+
+def _first_unnegated_match(regex: re.Pattern, text: str) -> bool:
+    for match in regex.finditer(text):
+        prefix = text[max(0, match.start() - _NEGATION_WINDOW_CHARS):match.start()]
+        if not _NEGATION_BEFORE_RE.search(prefix):
+            return True
+    return False
+
+
 # Anchor phrases for embedding-assisted classification (optional)
 EVENT_ANCHORS: dict[str, str] = {
     "earnings_beat": "Company reported quarterly earnings that beat analyst estimates and expectations.",
@@ -188,17 +208,32 @@ class NarrativeStateClassification:
 def classify_events_rules(text: str, *, min_confidence: float = 0.55) -> list[EventClassification]:
     if not text.strip():
         return []
-    normalized = re.sub(r"\s+", " ", text.lower())
+    # Case is preserved: patterns are case-insensitive except the scoped (?-i:...) acronyms.
+    normalized = re.sub(r"\s+", " ", text)
     results: list[EventClassification] = []
     for event_type, patterns in _COMPILED_RULES.items():
         best = 0.0
         for regex, weight in patterns:
-            if regex.search(normalized):
-                best = max(best, weight)
+            if weight > best and _first_unnegated_match(regex, normalized):
+                best = weight
         if best >= min_confidence:
             results.append(EventClassification(event_type=event_type, confidence=best, method="rules"))
     results.sort(key=lambda item: item.confidence, reverse=True)
     return results
+
+
+_ANCHOR_VECTOR_CACHE: dict[str, dict[str, list[float] | None]] = {}
+
+
+def _anchor_vectors(embed_fn) -> dict[str, list[float] | None]:
+    """Embed EVENT_ANCHORS once per model instead of once per article (14 encodes saved per call)."""
+    cache_key = getattr(embed_fn, "cache_key", None)
+    if cache_key is not None and cache_key in _ANCHOR_VECTOR_CACHE:
+        return _ANCHOR_VECTOR_CACHE[cache_key]
+    vectors = {event: embed_fn(anchor) for event, anchor in EVENT_ANCHORS.items()}
+    if cache_key is not None and all(vectors.values()):
+        _ANCHOR_VECTOR_CACHE[cache_key] = vectors
+    return vectors
 
 
 def classify_events_embedding(
@@ -216,7 +251,7 @@ def classify_events_embedding(
         text_vec = embed_fn(text[:2000])
         if not text_vec:
             return []
-        anchor_vecs = {event: embed_fn(anchor) for event, anchor in EVENT_ANCHORS.items()}
+        anchor_vecs = _anchor_vectors(embed_fn)
         results: list[EventClassification] = []
         for event_type, anchor_vec in anchor_vecs.items():
             if not anchor_vec:

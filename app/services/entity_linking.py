@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 import re
+
+import numpy as np
 from dataclasses import dataclass, field
 
 from .company_aliases import normalize_entity_text
-from .embeddings_service import cosine_similarity, embed_text
 from .ticker_matcher import (
     STRICT_TICKER_MAX_LEN,
     TITLE_LEAD_CHARS,
@@ -37,7 +38,7 @@ PORTFOLIO_BOOST = 0.03
 
 
 FUZZY_NAME_MAX_COMPANIES = 400
-EMBEDDING_MAX_COMPANY_SCAN = 200
+EMBEDDING_TOP_K = 3
 ENTITY_LINK_TEXT_MAX_CHARS = 12_000
 NEWS_DISPLAY_MATCH_STRATEGIES = frozenset(
     {
@@ -266,6 +267,31 @@ def _merge_matches(matches: list[EntityMatch]) -> list[EntityMatch]:
     return sorted(best.values(), key=lambda item: item.confidence, reverse=True)
 
 
+def _build_vector_index(
+    company_vectors: dict[int, list[float]],
+    companies_by_id: dict[int, dict],
+) -> tuple[list[int], np.ndarray | None]:
+    """Stack company profile vectors into a row-normalized float32 matrix for fast cosine search."""
+    ids: list[int] = []
+    rows: list[list[float]] = []
+    dims: int | None = None
+    for company_id, vector in company_vectors.items():
+        if not vector or company_id not in companies_by_id:
+            continue
+        if dims is None:
+            dims = len(vector)
+        if len(vector) != dims:
+            continue
+        ids.append(company_id)
+        rows.append(vector)
+    if not rows:
+        return [], None
+    matrix = np.asarray(rows, dtype=np.float32)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return ids, matrix / norms
+
+
 class EntityLinker:
     def __init__(
         self,
@@ -280,6 +306,7 @@ class EntityLinker:
         self.companies_by_id = {company["id"]: company for company in companies}
         self.alias_index = alias_index
         self.company_vectors = company_vectors or {}
+        self._vector_ids, self._vector_matrix = _build_vector_index(self.company_vectors, self.companies_by_id)
         self.boosted_tickers = {ticker.upper() for ticker in (boosted_tickers or set())}
         self.max_matches = max_matches
         self._alias_entries = self._build_alias_entries()
@@ -474,34 +501,30 @@ class EntityLinker:
         *,
         exclude_company_ids: set[int],
     ) -> list[EntityMatch]:
-        if not article_vector or not self.company_vectors:
+        """Nearest company profiles to the article vector (cosine), across all companies.
+
+        Uses one matrix-vector product over the prebuilt index instead of a Python loop,
+        so every company is considered (previously only ~200 were scanned).
+        """
+        if not article_vector or self._vector_matrix is None:
             return []
+        query = np.asarray(article_vector, dtype=np.float32)
+        if query.shape[0] != self._vector_matrix.shape[1]:
+            return []
+        norm = float(np.linalg.norm(query))
+        if norm == 0.0:
+            return []
+        similarities = self._vector_matrix @ (query / norm)
+
         matches: list[EntityMatch] = []
-        candidate_ids: list[int] = []
-        for company in self.companies:
-            company_id = company["id"]
+        for idx in np.argsort(-similarities):
+            similarity = float(similarities[idx])
+            if similarity < EMBEDDING_MIN_SIMILARITY or len(matches) >= EMBEDDING_TOP_K:
+                break
+            company_id = self._vector_ids[idx]
             if company_id in exclude_company_ids:
                 continue
-            ticker = (company.get("ticker") or "").upper()
-            if ticker in self.boosted_tickers:
-                candidate_ids.append(company_id)
-        if len(candidate_ids) < EMBEDDING_MAX_COMPANY_SCAN:
-            for company_id in self.company_vectors:
-                if company_id in exclude_company_ids or company_id in candidate_ids:
-                    continue
-                candidate_ids.append(company_id)
-                if len(candidate_ids) >= EMBEDDING_MAX_COMPANY_SCAN:
-                    break
-        for company_id in candidate_ids:
-            vector = self.company_vectors.get(company_id)
-            if not vector:
-                continue
-            company = self.companies_by_id.get(company_id)
-            if not company:
-                continue
-            similarity = cosine_similarity(article_vector, vector)
-            if similarity < EMBEDDING_MIN_SIMILARITY:
-                continue
+            company = self.companies_by_id[company_id]
             confidence = round(min(EMBEDDING_MAX_CONFIDENCE, 0.55 + similarity * 0.35), 4)
             matches.append(
                 EntityMatch(
@@ -514,8 +537,7 @@ class EntityLinker:
                     embedding_similarity=round(similarity, 4),
                 )
             )
-        matches.sort(key=lambda item: item.confidence, reverse=True)
-        return matches[:3]
+        return matches
 
     def link_entities(
         self,
